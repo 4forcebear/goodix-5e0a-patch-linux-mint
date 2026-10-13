@@ -19,6 +19,7 @@ param(
     [string]$BlobPath = "dpapi_blob.bin",
     [string]$HashPath = "mcu_hash.txt",
     [string]$OutputPath = "goodix-5e0a.psk",
+    [switch]$Force,
     [switch]$RunAsSystem
 )
 
@@ -106,23 +107,24 @@ if (-not (Test-Path $ResolvedBlob)) {
 # If not running as SYSTEM, self-elevate via a one-off SYSTEM scheduled task
 if (-not $isSystem -and -not $RunAsSystem) {
     Write-Host "================================================================="
-    Write-Host "Goodix 5e0a PSK Decryptor"
-    Write-Host "Current identity: $($currentIdentity.Name) (elevation to SYSTEM required)"
+    Write-Host "Goodix 5e0a Key Unlocker"
+    Write-Host "Current identity: $($currentIdentity.Name) (elevation required)"
     Write-Host "================================================================="
 
     $taskName = "GoodixPskExtractTemp"
     $scriptFile = $MyInvocation.MyCommand.Path
-    $action = "powershell.exe -ExecutionPolicy Bypass -NoProfile -File `"$scriptFile`" -RunAsSystem"
+    $forceArg = if ($Force) { " -Force" } else { "" }
+    $action = "powershell.exe -ExecutionPolicy Bypass -NoProfile -File `"$scriptFile`" -RunAsSystem$forceArg"
 
-    Write-Host "[*] Creating temporary SYSTEM task to unseal DPAPI key..."
+    Write-Host "[*] Requesting system privilege to unlock the key..."
     $createOutput = schtasks /create /tn $taskName /tr $action /sc once /st 00:00 /ru "NT AUTHORITY\SYSTEM" /rl HIGHEST /f 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to create scheduled task as SYSTEM. Please run PowerShell as Administrator! Details: $createOutput"
+        Write-Error "Failed to elevate. Please run PowerShell as Administrator! Details: $createOutput"
         exit 1
     }
 
     try {
-        Write-Host "[*] Running task..."
+        Write-Host "[*] Unlocking key..."
         schtasks /run /tn $taskName | Out-Null
         Start-Sleep -Seconds 2
     } finally {
@@ -132,7 +134,7 @@ if (-not $isSystem -and -not $RunAsSystem) {
     if (Test-Path $ResolvedOutput) {
         $extractedKey = (Get-Content $ResolvedOutput).Trim()
         Write-Host ""
-        Write-Host "[+] SUCCESS! Extracted 32-byte TLS PSK:"
+        Write-Host "[+] Extracted sensor encryption key:"
         Write-Host "    $extractedKey"
         Write-Host ""
         Write-Host "[+] Saved to: $ResolvedOutput"
@@ -164,15 +166,18 @@ try {
         $computedHashBytes = $sha.ComputeHash($plain)
         $computedHashHex = [System.BitConverter]::ToString($computedHashBytes).Replace("-", "").ToLower()
 
-        if ($computedHashHex -ne $expectedHash) {
-            Write-Error "[-] FATAL: Decrypted key hash ($computedHashHex) does NOT match hardware MCU hash ($expectedHash). Aborting without writing PSK file."
+        if ($computedHashHex -eq $expectedHash) {
+            Write-Host "[+] Hash verification MATCHED: $computedHashHex"
+        } elseif ($Force) {
+            Write-Host "[-] WARNING: Key hash ($computedHashHex) does not match expected ($expectedHash). Writing output because -Force was specified."
+        } else {
+            Write-Error "[-] Key hash mismatch ($computedHashHex vs $expectedHash). If you want to write the key anyway, re-run with -Force"
             exit 1
         }
-        Write-Host "[+] Hash verification MATCHED: $computedHashHex"
     }
 
     [System.IO.File]::WriteAllText($ResolvedOutput, $hex + "`n")
-    Write-Host "[+] Successfully generated $ResolvedOutput"
+    Write-Host "[+] Written to $ResolvedOutput"
 } catch {
     Write-Error "Decryption failed under SYSTEM: $_"
     exit 1

@@ -1,21 +1,20 @@
-; SELinux policy for the Goodix 5e0a engine loader (ticket 98).
-;
-; goodix_milan.c loads GoodixEngineAdapter.dll by writing it into an
-; anonymous memfd and mapping/executing it in-process (W^X via
-; memfd_create). Stock policy denies fprintd_t write/map/read/execute on
-; tmpfs memfd files, so enrollment fails with
-; "failed to load GoodixEngineAdapter.dll" on enforcing systems even
-; though the DLL file itself is readable. This rule was confirmed
-; sufficient on Fedora 44 Enforcing (see the ticket 98 hardware record);
-; the full denial chain is write -> map -> read -> execute.
-;
-; Build and install (run as root, from this directory):
-;   checkmodule -M -m -o goodix-engine.mod goodix-engine.te
-;   semodule_package -o goodix-engine.pp -m goodix-engine.mod
-;   sudo semodule -i goodix-engine.pp
-;
-; Remove with: sudo semodule -r goodix-engine
-; Verify with: sudo journalctl -b 0 --grep "AVC|denied"   (should stay clean)
+# SELinux policy for the Goodix 5e0a engine loader (ticket 98).
+#
+# goodix_milan.c loads GoodixEngineAdapter.dll by writing it into an
+# anonymous memfd and mapping/executing it in-process via memfd_create.
+# Stock policy denies fprintd_t write/map/read/execute on tmpfs memfd
+# files, so enrollment fails with "failed to load GoodixEngineAdapter.dll"
+# on enforcing systems even though the DLL file itself is readable.
+# This rule was confirmed sufficient on Fedora 44 Enforcing.
+# The full denial chain is write -> map -> read -> execute.
+#
+# Build and install (run as root, from this directory):
+#   checkmodule -M -m -o goodix-engine.mod goodix-engine.te
+#   semodule_package -o goodix-engine.pp -m goodix-engine.mod
+#   sudo semodule -i goodix-engine.pp
+#
+# Remove with: sudo semodule -r goodix-engine
+# Verify with: sudo journalctl -b 0 --grep "AVC|denied"   (should stay clean)
 
 module goodix-engine 1.0;
 

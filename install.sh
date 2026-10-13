@@ -93,8 +93,19 @@ usage() {
 
 integration_hints() {
     if command -v getenforce >/dev/null 2>&1 && [[ $(getenforce 2>/dev/null) == Enforcing ]]; then
-        echo "SELinux is Enforcing: the engine loader needs the memfd policy in packaging/selinux/"
-        echo '(see packaging/selinux/README.md) or enrollment fails with "failed to load GoodixEngineAdapter.dll".'
+        if command -v semodule >/dev/null 2>&1 && semodule -l 2>/dev/null | grep -q "^goodix-engine\b"; then
+            echo "SELinux is Enforcing: goodix-engine policy module is active."
+        else
+            echo "SELinux is Enforcing: the engine loader needs the memfd policy in packaging/selinux/"
+            echo '(see packaging/selinux/README.md) or enrollment fails with "failed to load GoodixEngineAdapter.dll".'
+            echo 'Run ./install.sh --integrate to install the policy automatically if checkmodule is present.'
+        fi
+    fi
+    local psk_path=/etc/libfprint/goodix-5e0a.psk
+    if [[ -f $psk_path ]]; then
+        echo "Sensor key: $psk_path is present."
+    else
+        echo "Sensor key: using fallback key. If fprintd-enroll fails, see docs/psk-extraction.md."
     fi
     if command -v authselect >/dev/null; then
         echo 'Desktop/login setup is separate from driver installation. Keep a password session open.'
@@ -114,6 +125,24 @@ integration_hints() {
 # ponytail: authselect-only on purpose; other distros keep their README steps.
 apply_integration() (
     set -euo pipefail
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if command -v getenforce >/dev/null 2>&1 && [[ $(getenforce 2>/dev/null) == Enforcing ]]; then
+        if command -v semodule >/dev/null 2>&1 && semodule -l 2>/dev/null | grep -q "^goodix-engine\b"; then
+            echo "SELinux: goodix-engine module already installed."
+        elif command -v checkmodule >/dev/null 2>&1 && command -v semodule_package >/dev/null 2>&1; then
+            echo "Building and installing SELinux policy module..."
+            local se_tmp
+            se_tmp="$(mktemp -d)"
+            checkmodule -M -m -o "$se_tmp/goodix-engine.mod" "$script_dir/packaging/selinux/goodix-engine.te"
+            semodule_package -o "$se_tmp/goodix-engine.pp" -m "$se_tmp/goodix-engine.mod"
+            sudo semodule -i "$se_tmp/goodix-engine.pp"
+            rm -rf -- "$se_tmp"
+            echo "Installed SELinux policy goodix-engine."
+        else
+            echo "SELinux is Enforcing; install checkpolicy to compile packaging/selinux/goodix-engine.te."
+        fi
+    fi
     command -v authselect >/dev/null || { fail 'authselect not found; wire PAM manually (see README)'; exit 1; }
     if command -v rpm >/dev/null; then
         rpm -q fprintd-pam >/dev/null 2>&1 || { fail 'fprintd-pam is not installed. Fedora/RHEL: sudo dnf install fprintd-pam'; exit 1; }
@@ -226,7 +255,7 @@ main() (
                 libgusb-dev libpixman-1-dev libssl-dev libnss3-dev libnspr4-dev libgirepository1.0-dev ;;
         dnf)
             sudo dnf install -y git meson ninja-build pkgconf-pkg-config gcc gcc-c++ fprintd fprintd-pam glib2-devel libusb1-devel \
-                libgusb-devel pixman-devel openssl-devel nss-devel nspr-devel gobject-introspection-devel ;;
+                libgusb-devel pixman-devel openssl-devel nss-devel nspr-devel gobject-introspection-devel checkpolicy ;;
         pacman)
             sudo pacman -S --needed --noconfirm git meson ninja pkgconf gcc fprintd glib2 libusb libgusb \
                 pixman openssl nss nspr gobject-introspection ;;

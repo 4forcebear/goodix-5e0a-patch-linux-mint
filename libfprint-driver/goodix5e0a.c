@@ -149,18 +149,10 @@ enum activate_states {
   ACTIVATE_NUM_STATES,
 };
 
-/* Ticket 48: Windows PresetPskIsVaildG (pskunify.c, 0x180038888) reads
- * the MCU PSK hash slot (0xbb020001) before every TLS handshake. This
- * read appears to initialize the MCU's TLS crypto subsystem — without
- * it, cold-boot TLS fails with bad record mac (cipher operation failed).
- * Activation: CHECK_FW_VER → CHECK_PSK (0xe4 read 0xbb020001) → TLS →
- * UPLOAD_CONFIG (post-TLS) → enable chip. */
-
+/* Ticket 48: PresetPskIsVaildG reads MCU slot 0xbb020001 to prime crypto. */
 static void activate_complete (FpiSsm *ssm, FpDevice *dev, GError *error);
 
-/* Ticket 48: PSK hash read callback — we don't validate the result.
- * The read's sole purpose is to poke the MCU's TLS crypto subsystem
- * into an initialized state before we attempt SSL_accept. */
+/* Ticket 48: PSK hash read callback primes the MCU crypto subsystem. */
 static void
 on_psk_hash_read (FpDevice *dev, gboolean success, guint32 flags,
                   guint8 *psk, guint16 length, gpointer user_data,
@@ -170,8 +162,6 @@ on_psk_hash_read (FpDevice *dev, gboolean success, guint32 flags,
 
   if (error)
     {
-      /* Non-fatal: log and continue — the worst that happens is TLS
-       * fails later, which the warm-fallback retry will catch. */
       fp_warn ("PSK hash read (0x%x) failed: %s — continuing to TLS",
                flags, error->message);
       g_error_free (error);
@@ -189,17 +179,7 @@ activate_run_state (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceGoodixTls5e0a *self = FPI_DEVICE_GOODIXTLS5E0A (dev);
 
-  /* Ticket 40 warm fast path: READ_AND_NOP is mandatory (deactivate stops
-   * the read loop, jumping past state 0 hangs) and CHECK_FW_VER is kept as
-   * the warm-path discriminator (fails warm fast on wrong FW). The one
-   * variable — whether READ_CHIP_ID/READ_OTP also skip — resolves to skip:
-   * both are zero-validation round-trips with no discriminating power on a
-   * device that proved itself seconds ago. fpi_ssm_jump_to_state from inside
-   * run_state has in-tree precedent (SCAN_5E0A_SESSION_D6 conditionally
-   * jumps to SCAN_5E0A_FDT_DOWN); jumping to ACTIVATE_NUM_STATES completes
-   * the SSM into activate_complete, i.e. the TLS handoff. The enum is NOT
-   * reduced (no duplicated callbacks, no renumbered states, journal
-   * continuity preserved). */
+  /* Ticket 40: READ_AND_NOP starts read loop; skips middle states on warm path. */
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case ACTIVATE_READ_AND_NOP:
@@ -208,10 +188,7 @@ activate_run_state (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case ACTIVATE_RESET:
-      /* Windows wire parity (ticket 45): wbdi.dll has McuResetMcu unimplemented
-       * and sends zero 0xa2 commands across all captures. CMD 0xa2 (reset_sensor=1)
-       * on cold boot desyncs MCU crypto state causing bad record mac on TLS accept.
-       * Proceed directly to CHECK_FW_VER on both cold and warm. */
+      /* Ticket 45: 5e0a relies on USB reset rather than MCU command 0xa2. */
       fpi_ssm_jump_to_state (ssm, ACTIVATE_CHECK_FW_VER);
       break;
 
@@ -238,12 +215,7 @@ activate_run_state (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case ACTIVATE_UPLOAD_CONFIG:
-      /* Ticket 48: Windows uploads config AFTER TLS completes (wbdi.dll
-       * Start sequence at 0x180083900: check PSK → start TLS → download
-       * chip config).  Uploading config before TLS on cold boot
-       * desynchronizes the MCU crypto engine, causing bad record mac.
-       * Config upload now happens in on_tls_activation_complete (or is
-       * skipped entirely on warm reuse). */
+      /* Ticket 48: Config upload occurs after TLS completion in on_tls_activation_complete. */
       if (self->warm_attempted)
         {
           fpi_ssm_jump_to_state (ssm, ACTIVATE_NUM_STATES);
@@ -2062,13 +2034,22 @@ goodix_5e0a_load_psk_override (FpDevice *dev)
   const char *path = "/etc/libfprint/goodix-5e0a.psk";
   g_autofree gchar *content = NULL;
   gsize length = 0;
+  GError *error = NULL;
 
-  if (!g_file_get_contents (path, &content, &length, NULL))
-    return;
+  if (!g_file_get_contents (path, &content, &length, &error))
+    {
+      if (!g_error_matches (error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
+        fp_warn ("5e0a: Failed to read %s: %s", path, error->message);
+      g_clear_error (&error);
+      return;
+    }
 
   gchar *str = g_strstrip (content);
   if (strlen (str) != 64)
-    return;
+    {
+      fp_warn ("5e0a: %s must contain exactly 64 hex characters (found %zu)", path, strlen (str));
+      return;
+    }
 
   for (size_t i = 0; i < 32; i++)
     {
@@ -2076,12 +2057,15 @@ goodix_5e0a_load_psk_override (FpDevice *dev)
       char *endptr = NULL;
       goodix_5e0a_psk_override[i] = (guint8) strtoul (hex_byte, &endptr, 16);
       if (endptr && *endptr != '\0')
-        return;
+        {
+          fp_warn ("5e0a: %s contains non-hex byte at index %zu", path, i);
+          return;
+        }
     }
 
   xx_cls->psk = goodix_5e0a_psk_override;
   xx_cls->psk_len = sizeof (goodix_5e0a_psk_override);
-  fp_info ("5e0a: Loaded per-device PSK override from %s", path);
+  fp_info ("5e0a: Loaded sensor key from %s", path);
 }
 
 static void

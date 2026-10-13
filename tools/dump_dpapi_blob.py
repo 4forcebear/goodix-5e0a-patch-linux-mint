@@ -28,7 +28,11 @@ try:
     import usb.core
 except ImportError:
     print("ERROR: python package 'pyusb' is required.", file=sys.stderr)
-    print("Install it with: sudo apt install python3-usb (Debian/Ubuntu) or pip install pyusb", file=sys.stderr)
+    print("Install it with:", file=sys.stderr)
+    print("  Fedora/RHEL:   sudo dnf install python3-pyusb", file=sys.stderr)
+    print("  Debian/Ubuntu: sudo apt install python3-usb", file=sys.stderr)
+    print("  Arch Linux:    sudo pacman -S python-pyusb", file=sys.stderr)
+    print("  Pip fallback:  pip install pyusb", file=sys.stderr)
     sys.exit(1)
 
 try:
@@ -41,16 +45,21 @@ except ImportError as e:
 
 
 def main():
+    out_dir = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    hash_path = out_dir / "mcu_hash.txt"
+    blob_path = out_dir / "dpapi_blob.bin"
+
     print("=" * 65)
-    print("Goodix 27c6:5e0a DPAPI Blob & Key Hash Extractor")
+    print("Goodix 27c6:5e0a Key Extractor")
+    print(f"Output directory: {out_dir}")
     print("=" * 65)
 
     try:
         device = goodix.Device(0x5e0a, goodix_protocol.USBProtocol)
     except Exception as e:
         print(f"ERROR: Cannot open Goodix 27c6:5e0a USB device: {e}")
-        print("Make sure 'fprintd' is stopped (sudo systemctl stop fprintd)")
-        print("and run this script as root (sudo python3 tools/dump_dpapi_blob.py).")
+        print("Stop fprintd (sudo systemctl stop fprintd) and run as root.")
         sys.exit(1)
 
     try:
@@ -67,45 +76,47 @@ def main():
     except Exception as e:
         print(f"[-] Could not read firmware version: {e}")
 
-    # 1. Read slot 0xbb020001 (MCU SHA-256 hash)
+    # Read sensor key hash
     mcu_hash = None
     try:
         reply = device.preset_psk_read(0xbb020001, 32, 0)
         if reply and reply[0]:
             mcu_hash = reply[2]
             hash_hex = mcu_hash.hex()
-            print(f"[+] Slot 0xbb020001 (MCU Key Hash): {hash_hex}")
-            Path("mcu_hash.txt").write_text(hash_hex + "\n")
-            print("    -> Saved to mcu_hash.txt")
+            print(f"[+] Sensor key hash: {hash_hex}")
+            hash_path.write_text(hash_hex + "\n")
+            print(f"    -> Saved to {hash_path}")
         else:
-            print("[-] MCU returned error reading slot 0xbb020001")
+            print("[-] Sensor returned error reading key hash")
     except Exception as e:
-        print(f"[-] Exception reading slot 0xbb020001: {e}")
+        print(f"[-] Exception reading key hash: {e}")
 
-    # 2. Read slot 0xbb010002 (Windows DPAPI sealed blob)
+    # Read locked key file
     sealed_blob = None
     try:
         reply = device.preset_psk_read(0xbb010002, 256, 0)
         if reply and reply[0]:
             sealed_blob = reply[2]
-            print(f"[+] Slot 0xbb010002 (DPAPI Sealed Blob): {len(sealed_blob)} bytes read")
-            Path("dpapi_blob.bin").write_bytes(sealed_blob)
-            print("    -> Saved to dpapi_blob.bin")
+            print(f"[+] Locked sensor key: {len(sealed_blob)} bytes read")
+            blob_path.write_bytes(sealed_blob)
+            print(f"    -> Saved to {blob_path}")
         else:
-            print("[-] MCU returned error reading slot 0xbb010002 (slot empty or unprovisioned)")
+            print("[-] Sensor returned error reading locked key")
     except Exception as e:
-        print(f"[-] Exception reading slot 0xbb010002: {e}")
+        print(f"[-] Exception reading locked key: {e}")
 
     print("\n" + "=" * 65)
     if sealed_blob:
-        print("Extraction complete! Next steps:")
-        print("  1. Copy 'dpapi_blob.bin' (and optionally 'mcu_hash.txt') to your Windows drive.")
-        print("  2. In Windows (PowerShell as Administrator), run:")
+        print("Extraction complete. Next steps:")
+        print(f"  1. Copy {blob_path.name} and {hash_path.name} to Windows (via USB drive or dual boot).")
+        print("  2. In Windows PowerShell as Administrator, run:")
         print("     powershell -ExecutionPolicy Bypass -File .\\tools\\decrypt_psk.ps1")
-        print("  3. It will decrypt the key and create 'goodix-5e0a.psk'.")
-        print("  4. Copy 'goodix-5e0a.psk' back to Linux at /etc/libfprint/goodix-5e0a.psk.")
+        print("  3. Copy the resulting goodix-5e0a.psk to /etc/libfprint/goodix-5e0a.psk on Linux:")
+        print("     sudo cp goodix-5e0a.psk /etc/libfprint/goodix-5e0a.psk")
+        print("     sudo chmod 600 /etc/libfprint/goodix-5e0a.psk")
+        print("  See docs/psk-extraction.md for full instructions.")
     else:
-        print("Extraction failed: could not retrieve the sealed DPAPI blob from MCU.")
+        print("Extraction failed: could not read the locked key from the sensor.")
     print("=" * 65)
 
 

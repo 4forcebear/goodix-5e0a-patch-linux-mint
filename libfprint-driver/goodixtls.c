@@ -182,12 +182,17 @@ goodix_tls_init_serve (void *me)
   if (retr <= 0)
     {
       unsigned long err_code;
+      gboolean psk_mismatch = FALSE;
       while ((err_code = ERR_get_error ()) != 0)
         {
+          if (err_code == 0x0a000119 || err_code == 0x1c800066)
+            psk_mismatch = TRUE;
           g_warning ("5e0a TLS accept failed: %s (0x%lx, cipher: %s)",
                      ERR_error_string (err_code, NULL), err_code,
                      SSL_get_cipher_name (self->ssl_layer));
         }
+      if (psk_mismatch)
+        g_warning ("5e0a: Sensor key mismatch. This laptop needs its unique key in /etc/libfprint/goodix-5e0a.psk. See docs/psk-extraction.md");
       /* Unblock client_fd reader so it does not hang indefinitely on failed accept */
       if (self->sock_fd >= 0)
         shutdown (self->sock_fd, SHUT_RDWR);
