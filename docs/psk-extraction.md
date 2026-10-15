@@ -1,61 +1,36 @@
-# Extracting your sensor encryption key
+# Extracting Your Sensor Key (PSK)
 
-Goodix 5e0a sensors encrypt communication using a key stored inside the sensor hardware.
+When Windows sets up the sensor for the first time, it locks the hardware with a unique key. If your laptop uses its own key, enrollment fails with `enroll-unknown-error` (`bad record MAC` in the logs).
 
-When Windows sets up the sensor for the first time, it generates a unique key for that specific laptop. The driver includes a sample key from the developer machine. If your laptop uses a different key, enrollment fails with `enroll-unknown-error`, and `journalctl -u fprintd` reports a bad record MAC error.
-
-To fix this, extract the key from your laptop once and save it to `/etc/libfprint/goodix-5e0a.psk`.
-
-## How extraction works
-
-The sensor keeps a copy of the key locked with Windows machine security.
-
-1. You run a Linux script to read the locked key file from the sensor over USB.
-2. You run a PowerShell script in Windows on the same laptop to unlock the key file.
-3. You copy the unlocked key back to Linux.
+You only need to extract this key once. **Back up the final `goodix-5e0a.psk` file to Google Drive or somewhere safe**—if you distrohop or wipe Linux later, you can drop that same file back in without ever booting Windows again.
 
 ---
 
-## Dual boot laptops
+## Dual-Boot Laptops (Windows Installed)
 
-If Windows is already installed on your laptop, key extraction takes only a few minutes.
+### 1. Dump the locked key in Linux
 
-### 1. Read the locked key in Linux
-
-Stop the fingerprint daemon and run the extractor:
+Stop the fingerprint service and read the locked key from the sensor:
 
 ```bash
 sudo systemctl stop fprintd
 sudo python3 tools/dump_dpapi_blob.py
 ```
 
-This creates two files in your current directory:
-
-- `dpapi_blob.bin`
-- `mcu_hash.txt`
+This creates `dpapi_blob.bin` and `mcu_hash.txt` in your current directory.
 
 ### 2. Move the files to Windows
 
+Copy these three files to Windows (via a USB drive, cloud storage, or a mounted partition):
 - `dpapi_blob.bin`
 - `mcu_hash.txt`
 - `tools/decrypt_psk.ps1`
 
-You can also mount your Windows partition directly from Linux if your drive is unencrypted:
-
-```bash
-sudo mkdir -p /mnt/windows
-sudo mount /dev/nvme0n1p3 /mnt/windows
-cp dpapi_blob.bin mcu_hash.txt tools/decrypt_psk.ps1 /mnt/windows/Users/<YourUsername>/Downloads/
-sudo umount /mnt/windows
-```
-
-If Windows has BitLocker or Fast Startup enabled, Linux will not mount the partition cleanly. Use a USB drive (or simply, the internet) instead.
-
 ### 3. Unlock the key in Windows
 
-1. Reboot your laptop into Windows.
-2. Open the Start menu, search for **PowerShell**, right-click it, and choose **Run as Administrator**.
-3. Go to the folder containing your copied files, for example your USB drive or Downloads folder:
+1. Boot into Windows.
+2. Open **PowerShell as Administrator**.
+3. Go to the folder containing the three files:
    ```powershell
    cd "$HOME\Downloads"
    ```
@@ -64,71 +39,57 @@ If Windows has BitLocker or Fast Startup enabled, Linux will not mount the parti
    powershell -ExecutionPolicy Bypass -File .\decrypt_psk.ps1
    ```
 
-The script unlocks the key and writes `goodix-5e0a.psk`.
+This writes `goodix-5e0a.psk` to the same folder. **Upload a copy of `goodix-5e0a.psk` to Google Drive now** so you don't lose it the next time you switch distros.
 
 ### 4. Install the key in Linux
 
-1. Reboot back into Linux.
-2. Copy `goodix-5e0a.psk` to `/etc/libfprint/`:
-   ```bash
-   sudo mkdir -p /etc/libfprint
-   sudo cp goodix-5e0a.psk /etc/libfprint/goodix-5e0a.psk
-   sudo chmod 600 /etc/libfprint/goodix-5e0a.psk
-   sudo systemctl restart fprintd
-   ```
-3. Test enrollment:
-   ```bash
-   fprintd-enroll
-   ```
-
----
-
-## Linux-only laptops
-
-If you wiped your drive and removed Windows, the original keys on disk were deleted.
-
-Virtual machines like VirtualBox or QEMU will not work. The key is locked to the physical hardware security of Windows running directly on this laptop.
-
-You will need a temporary Windows environment running on bare metal:
-
-1. Use Rufus or Ventoy on another machine to create a bootable **Windows To Go** USB drive with Windows 10 or 11.
-2. Download the official Goodix fingerprint driver for your laptop model from the manufacturer website. Put the installer on the USB drive.
-3. Boot your laptop from the Windows To Go USB drive.
-4. Install the manufacturer fingerprint driver. Once installed, Windows pairs with the sensor and writes a fresh key. Check Windows Settings to verify fingerprint setup appears.
-5. Reboot into Linux. Run `sudo python3 tools/dump_dpapi_blob.py` to read the new locked key from the sensor.
-6. Copy `dpapi_blob.bin`, `mcu_hash.txt`, and `tools/decrypt_psk.ps1` to the USB drive.
-7. Reboot into Windows To Go. Open PowerShell as Administrator, run `decrypt_psk.ps1`, and collect `goodix-5e0a.psk`.
-8. Boot back into Linux and install the key to `/etc/libfprint/goodix-5e0a.psk`.
-
----
-
-## Common issues
-
-### PowerShell blocks script execution
-
-Always include `-ExecutionPolicy Bypass` when running the script:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\decrypt_psk.ps1
-```
-
-### Script reports access denied
-
-Open PowerShell by right-clicking and choosing **Run as Administrator**. Standard user accounts cannot unlock machine security keys.
-
-### Hash mismatch warning
-
-If the script warns that the key hash does not match, re-run with `-Force` to save the key anyway:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\decrypt_psk.ps1 -Force
-```
-
-### Permission denied in Linux
-
-The key file must belong to root:
+Boot into Linux and install the key:
 
 ```bash
+sudo mkdir -p /etc/libfprint
+sudo cp goodix-5e0a.psk /etc/libfprint/goodix-5e0a.psk
 sudo chown root:root /etc/libfprint/goodix-5e0a.psk
 sudo chmod 600 /etc/libfprint/goodix-5e0a.psk
+sudo systemctl restart fprintd
 ```
+
+Test enrollment:
+
+```bash
+fprintd-enroll
+```
+
+---
+
+## Linux-Only Laptops (No Windows Installed)
+
+If you wiped Windows from your drive, the decryption keys on disk are gone. Virtual machines (QEMU/VirtualBox) will not work because the key is tied to Windows running on your laptop's physical hardware.
+
+You need a temporary **Windows To Go** USB drive to generate and extract a fresh key:
+
+1. Use **Rufus** on another computer to flash a Windows 10 or 11 ISO onto a USB drive in **Windows To Go** mode.
+2. Download the official Windows Goodix fingerprint driver from your laptop manufacturer's website and put the installer on the USB drive.
+3. Boot your laptop from the Windows To Go USB drive.
+4. Install the fingerprint driver. Once installed, Windows pairs with the sensor and writes a fresh key to the hardware.
+5. Reboot into Linux and dump the new locked key:
+   ```bash
+   sudo systemctl stop fprintd
+   sudo python3 tools/dump_dpapi_blob.py
+   ```
+6. Copy `dpapi_blob.bin`, `mcu_hash.txt`, and `tools/decrypt_psk.ps1` to the USB drive.
+7. Boot back into the Windows To Go USB, open **PowerShell as Administrator**, and run:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\decrypt_psk.ps1
+   ```
+8. Copy the generated `goodix-5e0a.psk` to Linux, **back it up to Google Drive**, and install it using [Step 4](#4-install-the-key-in-linux) above.
+
+---
+
+## Troubleshooting
+
+- **PowerShell blocks the script or says Access Denied:** Make sure you opened PowerShell via **Run as Administrator** and included `-ExecutionPolicy Bypass`.
+- **Hash mismatch warning:** Re-run the PowerShell script with `-Force` to save the key anyway:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\decrypt_psk.ps1 -Force
+  ```
+- **Permission denied in Linux:** Ensure `/etc/libfprint/goodix-5e0a.psk` is owned by `root:root` with `600` permissions (see Step 4).
