@@ -33,11 +33,32 @@ sys.modules["protocol"] = goodix_protocol
 vendor_dir = Path(__file__).resolve().parent / "vendor"
 if vendor_dir.exists():
     sys.path.insert(0, str(vendor_dir))
-sys.path.insert(0, "/tmp/goodix-fp-dump")
-import goodix  # noqa: E402
-import tool  # noqa: E402
+try:
+    import goodix  # noqa: E402
+    import tool  # noqa: E402
+except ImportError:
+    goodix = None
+    tool = None
 
-PSK = bytes.fromhex("d853ad1941b2dc5350c766cd726ef7a5df7d5fa39053bfac269ce752d7a8b2ab")
+DEFAULT_PSK = bytes.fromhex("d853ad1941b2dc5350c766cd726ef7a5df7d5fa39053bfac269ce752d7a8b2ab")
+
+
+def resolve_psk(psk_arg: str | None = None) -> bytes:
+    """Resolve TLS pre-shared key: explicit argument, /etc/libfprint/goodix-5e0a.psk, or default dev unit key."""
+    if psk_arg:
+        p = Path(psk_arg)
+        if p.is_file():
+            return bytes.fromhex(p.read_text(encoding="utf-8").strip())
+        if "/" in psk_arg or "\\" in psk_arg:
+            raise FileNotFoundError(f"PSK file not found: {psk_arg}")
+        return bytes.fromhex(psk_arg.strip())
+    system_psk = Path("/etc/libfprint/goodix-5e0a.psk")
+    if system_psk.is_file():
+        try:
+            return bytes.fromhex(system_psk.read_text(encoding="utf-8").strip())
+        except Exception as e:
+            print(f"[-] Warning: Failed to read {system_psk}: {e}", file=sys.stderr)
+    return DEFAULT_PSK
 CONFIG_52XD = bytes.fromhex(
     "701160712c9d2cc91ce518fd00fd00fd03ba000180ca0008008400bec38600b1"
     "b68800baba8a00b3b38c00bcbc8e00b1b19000bbbb9200b1b194000000960000"
@@ -98,10 +119,18 @@ def main() -> int:
                     help="e.g. legacy-experiments/live_burst_press")
     ap.add_argument("--frames", type=int, default=N_FRAMES)
     ap.add_argument("--port", type=int, default=4433)
+    ap.add_argument("--psk", default=None,
+                    help="Hex PSK or path to PSK file (default: /etc/libfprint/goodix-5e0a.psk if present, else dev key)")
     args = ap.parse_args()
 
+    if goodix is None or tool is None:
+        print("ERROR: Missing goodix protocol helpers or pyusb. Please run under nix-shell as documented in header.", file=sys.stderr)
+        return 1
+
+    psk = resolve_psk(args.psk)
+
     tls_server = subprocess.Popen(
-        ["openssl", "s_server", "-nocert", "-psk", PSK.hex(),
+        ["openssl", "s_server", "-nocert", "-psk", psk.hex(),
          "-cipher", "PSK-AES128-CBC-SHA256", "-tls1_2",
          "-port", str(args.port), "-quiet"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -116,6 +145,7 @@ def main() -> int:
               f"missing. Kill stale `s_server` PIDs (pgrep -af s_server) or "
               f"retry with --port <fresh>.", file=sys.stderr)
         return 2
+
     try:
         device = goodix.Device(0x5E0A, goodix_protocol.USBProtocol)
         device.nop()

@@ -151,6 +151,9 @@ if (-not $isSystem -and -not $RunAsSystem) {
     $forceArg = if ($Force) { " -Force" } else { "" }
     $action = "powershell.exe -ExecutionPolicy Bypass -NoProfile -File `"$scriptFile`" -RunAsSystem$forceArg"
 
+    if (Test-Path $ResolvedOutput) {
+        Remove-Item -Path $ResolvedOutput -Force
+    }
     if (Test-Path $ResolvedLog) {
         Remove-Item -Path $ResolvedLog -Force -ErrorAction SilentlyContinue
     }
@@ -168,14 +171,21 @@ if (-not $isSystem -and -not $RunAsSystem) {
         exit 1
     }
 
+    $runFailed = $false
     try {
         Write-Host "[*] Unlocking key..."
         $ErrorActionPreference = "Continue"
-        schtasks /run /tn $taskName 2>&1 | Out-Null
+        $runOutput = schtasks /run /tn $taskName 2>&1
+        $runExit = $LASTEXITCODE
         $ErrorActionPreference = $origPref
-        # Poll up to 20 seconds for the decrypted key output
-        for ($i = 0; $i -lt 20 -and -not (Test-Path $ResolvedOutput); $i++) {
-            Start-Sleep -Seconds 1
+        if ($runExit -ne 0) {
+            Write-Error "Failed to run scheduled task '$taskName' (exit code $runExit): $runOutput"
+            $runFailed = $true
+        } else {
+            # Poll up to 20 seconds for the decrypted key output
+            for ($i = 0; $i -lt 20 -and -not (Test-Path $ResolvedOutput); $i++) {
+                Start-Sleep -Seconds 1
+            }
         }
     } finally {
         $ErrorActionPreference = "Continue"
@@ -183,8 +193,17 @@ if (-not $isSystem -and -not $RunAsSystem) {
         $ErrorActionPreference = $origPref
     }
 
+    if ($runFailed) {
+        exit 1
+    }
+
     if (Test-Path $ResolvedOutput) {
         if (Test-Path $ResolvedLog) {
+            $warnings = Get-Content $ResolvedLog | Where-Object { $_ -like "*WARNING*" }
+            if ($warnings) {
+                Write-Host ""
+                $warnings | ForEach-Object { Write-Warning $_ }
+            }
             Remove-Item -Path $ResolvedLog -Force -ErrorAction SilentlyContinue
         }
         $extractedKey = (Get-Content $ResolvedOutput).Trim()
@@ -230,7 +249,14 @@ try {
     $plain = Decrypt-BlobCore -EncryptedBytes $bytes
 
     if ($plain.Length -ne 32) {
-        $logLines.Add("Warning: Decrypted payload length is $($plain.Length) bytes (expected 32 bytes).")
+        if ($Force) {
+            $logLines.Add("[-] WARNING: Decrypted payload length is $($plain.Length) bytes (expected 32 bytes). Writing output because -Force was specified.")
+        } else {
+            $msg = "Decrypted payload length is $($plain.Length) bytes (expected 32 bytes). Re-run with -Force to bypass."
+            $logLines.Add("ERROR: $msg")
+            [System.IO.File]::WriteAllLines($ResolvedLog, $logLines)
+            throw $msg
+        }
     }
 
     # Format as lowercase hex
@@ -253,6 +279,8 @@ try {
             [System.IO.File]::WriteAllLines($ResolvedLog, $logLines)
             throw $msg
         }
+    } else {
+        $logLines.Add("[-] WARNING: '$HashPath' not found; skipped hash verification against MCU.")
     }
 
     [System.IO.File]::WriteAllText($ResolvedOutput, $hex + "`n")

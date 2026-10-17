@@ -102,10 +102,10 @@ def read_dpapi_blob(device) -> bytes | None:
     The sensor firmware accepts reads up to ~400 bytes (larger reads like 512/1024 are rejected).
     Modern Windows DPAPI blobs are typically 324 bytes. We read up to 400 bytes,
     parse the DPAPI structure length, and trim any trailing buffer padding.
-    If 400 fails, we retry with decreasing sizes and fetch remaining chunks if needed.
+    If 400 fails, we retry with 256 bytes and fetch remaining chunks if needed.
     """
     blob = bytearray()
-    for try_len in [400, 384, 320, 256]:
+    for try_len in [400, 256]:
         try:
             reply = device.preset_psk_read(0xbb010002, try_len, 0)
             if reply and reply[0] and reply[2]:
@@ -119,32 +119,33 @@ def read_dpapi_blob(device) -> bytes | None:
         return None
 
     expected_len, is_complete = parse_dpapi_blob_length(blob)
-    if expected_len is not None:
-        if is_complete:
-            if len(blob) > expected_len:
-                print(f"[+] Trimming DPAPI blob from {len(blob)} to exact structure length {expected_len} bytes")
-                blob = blob[:expected_len]
-            else:
-                print(f"[+] Validated complete DPAPI blob: {len(blob)} bytes")
-            return bytes(blob)
+    if expected_len is None:
+        print("[-] Invalid DPAPI blob header (could not determine structure length).")
+        return None
+
+    if is_complete:
+        if len(blob) > expected_len:
+            print(f"[+] Trimming DPAPI blob from {len(blob)} to exact structure length {expected_len} bytes")
+            blob = blob[:expected_len]
         else:
-            needed = expected_len - len(blob)
-            print(f"[*] Blob truncated ({len(blob)} of {expected_len} bytes); fetching remaining {needed} bytes at offset {len(blob)}...")
-            try:
-                reply = device.preset_psk_read(0xbb010002, needed, len(blob))
-                if reply and reply[0] and reply[2]:
-                    blob.extend(reply[2])
-                    print(f"[+] Successfully fetched chunk; total size is now {len(blob)} bytes")
-                    exp2, comp2 = parse_dpapi_blob_length(blob)
-                    if exp2 and comp2:
-                        return bytes(blob[:exp2])
-            except Exception as e:
-                print(f"[-] Could not read remaining bytes with offset: {e}")
-            print(f"[-] WARNING: DPAPI blob may be incomplete ({len(blob)} bytes).")
-            return bytes(blob)
-    else:
-        print(f"[+] Read {len(blob)} bytes from slot 0xbb010002")
+            print(f"[+] Validated complete DPAPI blob: {len(blob)} bytes")
         return bytes(blob)
+
+    needed = expected_len - len(blob)
+    print(f"[*] Blob truncated ({len(blob)} of {expected_len} bytes); fetching remaining {needed} bytes at offset {len(blob)}...")
+    try:
+        reply = device.preset_psk_read(0xbb010002, needed, len(blob))
+        if reply and reply[0] and reply[2]:
+            blob.extend(reply[2])
+            print(f"[+] Successfully fetched chunk; total size is now {len(blob)} bytes")
+            exp2, comp2 = parse_dpapi_blob_length(blob)
+            if exp2 and comp2 and exp2 == expected_len:
+                return bytes(blob[:exp2])
+    except Exception as e:
+        print(f"[-] Could not read remaining bytes with offset: {e}")
+
+    print(f"[-] Incomplete DPAPI blob ({len(blob)} of {expected_len} bytes).")
+    return None
 
 
 def main():
@@ -153,6 +154,12 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     hash_path = out_dir / "mcu_hash.txt"
     blob_path = out_dir / "dpapi_blob.bin"
+
+    # Pre-flight removal of stale output files
+    if hash_path.exists():
+        hash_path.unlink()
+    if blob_path.exists():
+        blob_path.unlink()
 
     print("=" * 65)
     print("Goodix 27c6:5e0a Key Extractor")
@@ -184,7 +191,7 @@ def main():
     mcu_hash = None
     try:
         reply = device.preset_psk_read(0xbb020001, 32, 0)
-        if reply and reply[0]:
+        if reply and reply[0] and reply[2]:
             mcu_hash = reply[2]
             hash_hex = mcu_hash.hex()
             print(f"[+] Sensor key hash: {hash_hex}")
@@ -211,7 +218,10 @@ def main():
     print("\n" + "=" * 65)
     if sealed_blob:
         print("Extraction complete. Next steps:")
-        print(f"  1. Copy {blob_path.name} and {hash_path.name} to Windows (via USB drive or dual boot).")
+        if hash_path.exists():
+            print(f"  1. Copy {blob_path.name} and {hash_path.name} to Windows (via USB drive or dual boot).")
+        else:
+            print(f"  1. Copy {blob_path.name} to Windows (via USB drive or dual boot).")
         print("  2. In Windows PowerShell as Administrator, run:")
         print("     powershell -ExecutionPolicy Bypass -File .\\tools\\decrypt_psk.ps1")
         print("  3. Copy the resulting goodix-5e0a.psk to /etc/libfprint/goodix-5e0a.psk on Linux:")
@@ -219,7 +229,8 @@ def main():
         print("     sudo chmod 600 /etc/libfprint/goodix-5e0a.psk")
         print("  See docs/psk-extraction.md for full instructions.")
     else:
-        print("Extraction failed: could not read the locked key from the sensor.")
+        print("Extraction failed: could not read a valid locked key blob from the sensor.")
+        sys.exit(1)
     print("=" * 65)
 
 
