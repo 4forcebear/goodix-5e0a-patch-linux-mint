@@ -24,27 +24,131 @@ repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root / "legacy-experiments"))
 sys.path.insert(0, str(repo_root / "legacy-experiments" / "vendor"))
 
-try:
-    import usb.core
-except ImportError:
-    print("ERROR: python package 'pyusb' is required.", file=sys.stderr)
-    print("Install it with:", file=sys.stderr)
-    print("  Fedora/RHEL:   sudo dnf install python3-pyusb", file=sys.stderr)
-    print("  Debian/Ubuntu: sudo apt install python3-usb", file=sys.stderr)
-    print("  Arch Linux:    sudo pacman -S python-pyusb", file=sys.stderr)
-    print("  Pip fallback:  pip install pyusb", file=sys.stderr)
-    sys.exit(1)
+def check_usb_deps():
+    try:
+        import usb.core
+    except ImportError:
+        print("ERROR: python package 'pyusb' is required.", file=sys.stderr)
+        print("Install it with:", file=sys.stderr)
+        print("  Fedora/RHEL:   sudo dnf install python3-pyusb", file=sys.stderr)
+        print("  Debian/Ubuntu: sudo apt install python3-usb", file=sys.stderr)
+        print("  Arch Linux:    sudo pacman -S python-pyusb", file=sys.stderr)
+        print("  Pip fallback:  pip install pyusb", file=sys.stderr)
+        sys.exit(1)
 
-try:
-    import goodix_protocol
-    sys.modules["protocol"] = goodix_protocol
-    import goodix
-except ImportError as e:
-    print(f"ERROR: Failed to import Goodix protocol helpers: {e}", file=sys.stderr)
-    sys.exit(1)
+    try:
+        import goodix_protocol
+        sys.modules["protocol"] = goodix_protocol
+        import goodix
+        return goodix, goodix_protocol
+    except ImportError as e:
+        print(f"ERROR: Failed to import Goodix protocol helpers: {e}", file=sys.stderr)
+        sys.exit(1)
+
+import struct
+
+
+def parse_dpapi_blob_length(data: bytes) -> tuple[int | None, bool]:
+    """Parse Windows DPAPI blob header and calculate its total expected length.
+
+    A standard Windows DPAPI blob structure:
+      dwVersion (4), guidProvider (16), dwMasterKeyVersion (4),
+      guidMasterKey (16), dwFlags (4), dwDescriptionLen (4), szDescription (var),
+      dwCryptAlgo (4), dwCryptAlgoLen (4), dwSaltLen (4), pbSalt (var),
+      dwPromptLen (4), pbPrompt (var),
+      dwSignAlgo (4), dwSignAlgoLen (4), dwSignSaltLen (4), pbSignSalt (var),
+      dwDataLen (4), pbData (var),
+      dwSignLen (4), pbSign (var).
+
+    Returns (expected_length, is_complete).
+    """
+    if len(data) < 48:
+        return None, False
+    try:
+        desc_len = struct.unpack_from("<I", data, 44)[0]
+        pos = 48 + desc_len
+        if len(data) < pos + 12:
+            return None, False
+        algo, algo_len, salt_len = struct.unpack_from("<III", data, pos)
+        pos += 12 + salt_len
+        if len(data) < pos + 4:
+            return None, False
+        prompt_len = struct.unpack_from("<I", data, pos)[0]
+        pos += 4 + prompt_len
+        if len(data) < pos + 12:
+            return None, False
+        sign_algo, sign_algo_len, sign_salt_len = struct.unpack_from("<III", data, pos)
+        pos += 12 + sign_salt_len
+        if len(data) < pos + 4:
+            return None, False
+        data_len = struct.unpack_from("<I", data, pos)[0]
+        pos += 4 + data_len
+        sign_bytes = sign_algo_len // 8 if sign_algo_len else 64
+        total_exp = pos + 4 + sign_bytes
+        if len(data) < pos + 4:
+            # pbData is complete, but dwSignLen and pbSign are truncated.
+            return total_exp, False
+        sign_len = struct.unpack_from("<I", data, pos)[0]
+        pos += 4 + sign_len
+        return pos, len(data) >= pos
+    except Exception:
+        return None, False
+
+
+
+def read_dpapi_blob(device) -> bytes | None:
+    """Read the Windows DPAPI blob from sensor slot 0xbb010002.
+
+    The sensor firmware accepts reads up to ~400 bytes (larger reads like 512/1024 are rejected).
+    Modern Windows DPAPI blobs are typically 324 bytes. We read up to 400 bytes,
+    parse the DPAPI structure length, and trim any trailing buffer padding.
+    If 400 fails, we retry with decreasing sizes and fetch remaining chunks if needed.
+    """
+    blob = bytearray()
+    for try_len in [400, 384, 320, 256]:
+        try:
+            reply = device.preset_psk_read(0xbb010002, try_len, 0)
+            if reply and reply[0] and reply[2]:
+                blob = bytearray(reply[2])
+                print(f"[+] Read slot 0xbb010002: {len(blob)} bytes (requested {try_len})")
+                break
+        except Exception:
+            continue
+
+    if not blob:
+        return None
+
+    expected_len, is_complete = parse_dpapi_blob_length(blob)
+    if expected_len is not None:
+        if is_complete:
+            if len(blob) > expected_len:
+                print(f"[+] Trimming DPAPI blob from {len(blob)} to exact structure length {expected_len} bytes")
+                blob = blob[:expected_len]
+            else:
+                print(f"[+] Validated complete DPAPI blob: {len(blob)} bytes")
+            return bytes(blob)
+        else:
+            needed = expected_len - len(blob)
+            print(f"[*] Blob truncated ({len(blob)} of {expected_len} bytes); fetching remaining {needed} bytes at offset {len(blob)}...")
+            try:
+                reply = device.preset_psk_read(0xbb010002, needed, len(blob))
+                if reply and reply[0] and reply[2]:
+                    blob.extend(reply[2])
+                    print(f"[+] Successfully fetched chunk; total size is now {len(blob)} bytes")
+                    exp2, comp2 = parse_dpapi_blob_length(blob)
+                    if exp2 and comp2:
+                        return bytes(blob[:exp2])
+            except Exception as e:
+                print(f"[-] Could not read remaining bytes with offset: {e}")
+            print(f"[-] WARNING: DPAPI blob may be incomplete ({len(blob)} bytes).")
+            return bytes(blob)
+    else:
+        print(f"[+] Read {len(blob)} bytes from slot 0xbb010002")
+        return bytes(blob)
 
 
 def main():
+    goodix, goodix_protocol = check_usb_deps()
     out_dir = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     out_dir.mkdir(parents=True, exist_ok=True)
     hash_path = out_dir / "mcu_hash.txt"
@@ -94,9 +198,8 @@ def main():
     # Read locked key file
     sealed_blob = None
     try:
-        reply = device.preset_psk_read(0xbb010002, 256, 0)
-        if reply and reply[0]:
-            sealed_blob = reply[2]
+        sealed_blob = read_dpapi_blob(device)
+        if sealed_blob:
             print(f"[+] Locked sensor key: {len(sealed_blob)} bytes read")
             blob_path.write_bytes(sealed_blob)
             print(f"    -> Saved to {blob_path}")
