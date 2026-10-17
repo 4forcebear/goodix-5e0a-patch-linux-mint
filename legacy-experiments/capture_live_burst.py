@@ -21,6 +21,8 @@ run from repo root:
 from __future__ import annotations
 
 import argparse
+import os
+import select
 import socket
 import subprocess
 import sys
@@ -59,16 +61,18 @@ def resolve_psk(psk_arg: str | None = None) -> bytes:
         except Exception as e:
             print(f"[-] Warning: Failed to read {system_psk}: {e}", file=sys.stderr)
     return DEFAULT_PSK
-CONFIG_52XD = bytes.fromhex(
-    "701160712c9d2cc91ce518fd00fd00fd03ba000180ca0008008400bec38600b1"
-    "b68800baba8a00b3b38c00bcbc8e00b1b19000bbbb9200b1b194000000960000"
-    "00980000009a000000d2000000d4000000d6000000d800000050000105d00000"
+GOODIX_5E0A_CONFIG = bytes.fromhex(
+    "b01160712c9d2cc91ce518fd00fd00fd03ba000180ca000400840015b3860000"
+    "c4880000ba8a0000b28c0000aa8e0000c19000bbbb9200b1b1940000a8960000"
+    "b6980000009a000000d2000000d4000000d6000000d800000050000105d00000"
     "00700000007200785674003412200010402a0102042200012024003200800001"
-    "005c000101560024205800010232000402660000027c00005882007f082a0182"
-    "072200012024001400800001405c00ea00560006145800040232000c02660000"
-    "027c000058820080082a0108005c000101540000016200080464001000660000"
-    "027c0000582a0108005c00e8005200080054000001660000027c00005820c50e"
+    "005c008000560024205800030232000c02660003007c000058820080152a0182"
+    "032200012024001400800001005c000001560004205800030232000c02660003"
+    "007c000058820080152a0108005c008000540010016200040364001900660003"
+    "007c0001582a0108005c0000015200080054000001660003007c00015800530e"
 )
+CONFIG_52XD = GOODIX_5E0A_CONFIG  # Backward-compatible alias
+GOODIX_5E0A_CAPTURE_PAYLOAD = bytes.fromhex("0500b000b200b000b100")
 
 N_FRAMES = 4
 
@@ -113,6 +117,41 @@ def write_canonical_pgm(path: str, pixels: list[int]) -> None:
         f.write("\n".join(lines) + "\n")
 
 
+def extract_tls_record(data: bytes) -> bytes:
+    """Extract TLS record ciphertext matching libfprint-driver/goodix.c:2140-2156."""
+    if len(data) > 9 and data[0] == 0x00 and data[1] == 0x20:
+        return data[9:]
+    if len(data) > 5 and data[0] != 0x17:
+        idx = data.find(b"\x17\x03\x03")
+        if idx != -1:
+            return data[idx:]
+    return data
+
+
+def read_pipe_timeout(pipe, nbytes: int, timeout: float = 5.0) -> bytes:
+    """Read exact nbytes from pipe with timeout to prevent hanging indefinitely on short wire reads."""
+    fd = pipe.fileno()
+    os.set_blocking(fd, False)
+    buf = bytearray()
+    deadline = time.time() + timeout
+    while len(buf) < nbytes:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        r, _, _ = select.select([fd], [], [], max(0.01, min(remaining, 0.5)))
+        if not r:
+            continue
+        try:
+            chunk = os.read(fd, nbytes - len(buf))
+            if not chunk:
+                break
+            buf.extend(chunk)
+        except (BlockingIOError, InterruptedError):
+            continue
+    return bytes(buf)
+
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-prefix", required=True,
@@ -128,6 +167,7 @@ def main() -> int:
         return 1
 
     psk = resolve_psk(args.psk)
+    print("[-] WARNING: PSK passed on command-line to openssl s_server is visible in process table (/proc / ps) to local users.", file=sys.stderr)
 
     tls_server = subprocess.Popen(
         ["openssl", "s_server", "-nocert", "-psk", psk.hex(),
@@ -158,7 +198,7 @@ def main() -> int:
         try:
             tool.connect_device(device, tls_client)
             device.tls_successfully_established()
-            device.upload_config_mcu(CONFIG_52XD)
+            device.upload_config_mcu(GOODIX_5E0A_CONFIG)
             device.enable_chip(True)
             device.write_sensor_register(0x022C, b"\x05\x03")
 
@@ -173,11 +213,11 @@ def main() -> int:
             print(">>> CAPTURING NOW — HOLD STEADY <<<")
             for n in range(1, args.frames + 1):
                 img_req = device.mcu_get_image(
-                    b"\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+                    GOODIX_5E0A_CAPTURE_PAYLOAD,
                     goodix.FLAGS_TRANSPORT_LAYER_SECURITY_DATA)
-                tls_client.sendall(img_req[9:])
+                tls_client.sendall(extract_tls_record(img_req))
                 time.sleep(0.15)
-                dec = tls_server.stdout.read(WIRE_BYTES)
+                dec = read_pipe_timeout(tls_server.stdout, WIRE_BYTES, timeout=5.0)
                 print(f"frame {n}: encrypted={len(img_req)} decrypted={len(dec)}")
                 if len(dec) != WIRE_BYTES:
                     print(f"frame {n}: SHORT READ ({len(dec)} != {WIRE_BYTES}) — "

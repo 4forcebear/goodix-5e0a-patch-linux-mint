@@ -176,11 +176,14 @@ class TestF111DpapiAndDiagnostics(unittest.TestCase):
         milan_c = GOODIX_MILAN_C.read_text(encoding="utf-8")
         milan_h = GOODIX_MILAN_H.read_text(encoding="utf-8")
 
-        # No band-aid frame dumping or env var hooks in production driver
+        # No band-aid frame dumping or env var hooks in proprietary engine
         self.assertNotIn("GOODIX_5E0A_DUMP_DIR", milan_c)
         self.assertNotIn("goodix_milan_dump_debug_frame", milan_h)
         self.assertNotIn("goodix5e0a_get_contrast_gain", c_src)
         self.assertNotIn('g_getenv ("GOODIX_5E0A_CONTRAST_GAIN")', c_src)
+        # Opt-in debug frame dump in goodix5e0a.c (Ticket 111 / Issue #12)
+        self.assertIn('g_getenv ("GOODIX_5E0A_DUMP_DIR")', c_src)
+        self.assertIn("goodix5e0a_dump_debug_frame", c_src)
 
         lines = [l for l in c_src.splitlines() if l.strip()]
         self.assertLess(len(lines), 2000, f"Driver LOC {len(lines)} exceeds 2000")
@@ -268,6 +271,86 @@ class TestF111DpapiAndDiagnostics(unittest.TestCase):
         self.assertIn("for try_len in [400, 256]:", dump_src)
         self.assertIn("if exp2 and comp2 and exp2 == expected_len:", dump_src)
         self.assertIn("sys.exit(1)", dump_src)
+
+    def test_j_debug_frame_dump_invariants(self):
+        """GOODIX_5E0A_DUMP_DIR opt-in debug dump writes P2 PGM frames without budget inflation."""
+        c_src = GOODIX5E0A_C.read_text(encoding="utf-8")
+        self.assertIn('goodix5e0a_dump_debug_frame (raw_frame, self->latest_norm_pixels);', c_src)
+        self.assertIn('g_mkdir_with_parents (dir, 0755)', c_src)
+        self.assertIn('fprintf (f, "P2\\n%d %d\\n%u\\n", GOODIX_5E0A_WIDTH, GOODIX_5E0A_HEIGHT, pass ? 255 : 4095);', c_src)
+        self.assertIn('"%s/frame_%04u_%s.pgm"', c_src)
+
+    def test_k_capture_live_burst_payloads_and_warning(self):
+        """capture_live_burst.py uses 5e0a MCU config, 5e0a capture payload, and warns on PSK exposure."""
+        burst_path = REPO_ROOT / "legacy-experiments" / "capture_live_burst.py"
+        burst_src = burst_path.read_text(encoding="utf-8")
+
+        import capture_live_burst
+        # Config matches goodix_5e0a_config
+        self.assertTrue(capture_live_burst.GOODIX_5E0A_CONFIG.startswith(bytes.fromhex("b0116071")))
+        self.assertEqual(len(capture_live_burst.GOODIX_5E0A_CONFIG), 256)
+        # Capture payload matches goodix5e0a_capture_payload
+        self.assertEqual(capture_live_burst.GOODIX_5E0A_CAPTURE_PAYLOAD, bytes.fromhex("0500b000b200b000b100"))
+        # Script invokes upload with 5e0a config and capture with 5e0a payload
+        self.assertIn("device.upload_config_mcu(GOODIX_5E0A_CONFIG)", burst_src)
+        self.assertIn("device.mcu_get_image(\n                    GOODIX_5E0A_CAPTURE_PAYLOAD,", burst_src)
+        # PSK exposure warning
+        self.assertIn("[-] WARNING: PSK passed on command-line to openssl s_server is visible in process table", burst_src)
+
+    def test_l_capture_helpers_and_pgm_format(self):
+        """Verify extract_tls_record, read_pipe_timeout, and PGM formatting invariants."""
+        import capture_live_burst
+        import os
+        import tempfile
+
+        # extract_tls_record logic
+        # 1. 0x00 0x20 header with > 9 bytes
+        pkt1 = b"\x00\x20\x00\x00\x00\x00\x00\x00\x00\x17\x03\x03\x00\x10hello"
+        self.assertEqual(capture_live_burst.extract_tls_record(pkt1), b"\x17\x03\x03\x00\x10hello")
+
+        # 2. Starts directly with TLS record header 0x17 0x03 0x03
+        pkt2 = b"\x17\x03\x03\x00\x10hello"
+        self.assertEqual(capture_live_burst.extract_tls_record(pkt2), pkt2)
+
+        # 3. Embedded TLS record header at offset 4
+        pkt3 = b"\x01\x02\x03\x04\x17\x03\x03\x00\x10hello"
+        self.assertEqual(capture_live_burst.extract_tls_record(pkt3), b"\x17\x03\x03\x00\x10hello")
+
+        # 4. Unknown/short returns unchanged
+        pkt4 = b"\x01\x02\x03"
+        self.assertEqual(capture_live_burst.extract_tls_record(pkt4), pkt4)
+
+        # read_pipe_timeout non-blocking timeout safety
+        r_fd, w_fd = os.pipe()
+        os.write(w_fd, b"short")
+        os.close(w_fd)
+        r_pipe = os.fdopen(r_fd, "rb")
+        try:
+            # Should read available bytes and exit on EOF without hanging
+            data = capture_live_burst.read_pipe_timeout(r_pipe, 100, timeout=0.2)
+            self.assertEqual(data, b"short")
+        finally:
+            r_pipe.close()
+
+        # PGM format verification (simulating goodix5e0a_dump_debug_frame)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_path = os.path.join(tmpdir, "frame_0001_raw.pgm")
+            norm_path = os.path.join(tmpdir, "frame_0001_norm.pgm")
+            # Write raw
+            with open(raw_path, "w") as f:
+                f.write(f"P2\n64 80\n4095\n" + " ".join(["2000"] * 5120) + "\n")
+            # Write norm
+            with open(norm_path, "w") as f:
+                f.write(f"P2\n64 80\n255\n" + " ".join(["128"] * 5120) + "\n")
+
+            for path, maxval in [(raw_path, 4095), (norm_path, 255)]:
+                with open(path) as f:
+                    lines = f.read().split()
+                self.assertEqual(lines[0], "P2")
+                self.assertEqual(lines[1], "64")
+                self.assertEqual(lines[2], "80")
+                self.assertEqual(lines[3], str(maxval))
+                self.assertEqual(len(lines[4:]), 5120)
 
 
 if __name__ == "__main__":

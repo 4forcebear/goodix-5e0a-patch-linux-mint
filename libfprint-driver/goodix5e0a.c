@@ -1226,6 +1226,32 @@ goodix5e0a_keep_best_frame (FpDevice *dev, gpointer ssm,
                             guint16 declen, guint active, guint range);
 
 static void
+goodix5e0a_dump_debug_frame (const GoodixTls5xxPix *raw, const guint8 *norm)
+{
+  const char *dir = g_getenv ("GOODIX_5E0A_DUMP_DIR");
+  static guint seq = 0;
+
+  if (!dir || !*dir || g_mkdir_with_parents (dir, 0755) != 0)
+    return;
+  seq++;
+  for (int pass = 0; pass < 2; pass++)
+    {
+      const void *buf = pass ? (const void *) norm : (const void *) raw;
+      if (!buf) continue;
+      char path[512];
+      g_snprintf (path, sizeof (path), "%s/frame_%04u_%s.pgm", dir, seq, pass ? "norm" : "raw");
+      FILE *f = fopen (path, "w");
+      if (!f) continue;
+      fprintf (f, "P2\n%d %d\n%u\n", GOODIX_5E0A_WIDTH, GOODIX_5E0A_HEIGHT, pass ? 255 : 4095);
+      for (guint i = 0; i < GOODIX_5E0A_FRAME_SIZE; i++)
+        fprintf (f, "%u%c", pass ? ((const guint8 *) buf)[i] : ((const guint16 *) buf)[i],
+                 (i % 16 == 15) ? '\n' : ' ');
+      fprintf (f, "\n");
+      fclose (f);
+    }
+}
+
+static void
 goodix5e0a_on_read_img (FpDevice *dev, guint8 *data, guint16 len,
                         gpointer ssm, GError *err)
 {
@@ -1278,11 +1304,9 @@ goodix5e0a_on_read_img (FpDevice *dev, guint8 *data, guint16 len,
   g_message ("5e0a scan_on_read_img: declen=%u", len);
 
   if (data && len >= 16)
-    {
-      fp_dbg ("5e0a raw first 16 bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-              data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-              data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15]);
-    }
+    fp_dbg ("5e0a raw first 16 bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15]);
 
   raw_frame = g_new0 (GoodixTls5xxPix, GOODIX_5E0A_FRAME_SIZE);
   guint32 decoded_pixels = goodix5e0a_decode_frame (raw_frame, data, len);
@@ -1296,33 +1320,29 @@ goodix5e0a_on_read_img (FpDevice *dev, guint8 *data, guint16 len,
   guint16 frame_min = 65535, frame_max = 0;
   for (guint32 i = 0; i < GOODIX_5E0A_FRAME_SIZE; i++)
     {
-      if (raw_frame[i] > 0)
+      guint16 px = raw_frame[i];
+      if (px > 0)
         {
           total_nonzero++;
-          if (raw_frame[i] < raw_min)
-            raw_min = raw_frame[i];
-          if (raw_frame[i] > raw_max)
-            raw_max = raw_frame[i];
+          if (px < raw_min) raw_min = px;
+          if (px > raw_max) raw_max = px;
         }
-      if (raw_frame[i] > 30)
+      if (px > 30)
         {
           frame_active++;
-          if (raw_frame[i] < frame_min)
-            frame_min = raw_frame[i];
-          if (raw_frame[i] > frame_max)
-            frame_max = raw_frame[i];
+          if (px < frame_min) frame_min = px;
+          if (px > frame_max) frame_max = px;
         }
     }
   guint frame_range = (frame_min != 65535 && frame_max > frame_min)
                       ? (guint) (frame_max - frame_min) : 0;
   fp_dbg ("5e0a wire layout: decoded_px=%u blocks=%u active_bytes=%u footer_bytes=%u",
-              decoded_pixels, MIN ((guint32) len / GOODIX_5E0A_BLOCK_BYTES,
-                                   (guint32) GOODIX_5E0A_FRAME_BLOCKS),
-              GOODIX_5E0A_BLOCK_ACTIVE_BYTES,
-              len >= GOODIX_5E0A_FRAME_WIRE_BYTES ? 4 : 0);
+          decoded_pixels, MIN ((guint32) len / GOODIX_5E0A_BLOCK_BYTES, (guint32) GOODIX_5E0A_FRAME_BLOCKS),
+          GOODIX_5E0A_BLOCK_ACTIVE_BYTES, len >= GOODIX_5E0A_FRAME_WIRE_BYTES ? 4 : 0);
   g_message ("5e0a row-major frame: active_px=%u nonzero=%u min=%u max=%u geometry=%dx%d (WxH)",
-              decoded_pixels, total_nonzero, raw_min == 65535 ? 0 : raw_min, raw_max,
-              GOODIX_5E0A_WIDTH, GOODIX_5E0A_HEIGHT);
+             decoded_pixels, total_nonzero, raw_min == 65535 ? 0 : raw_min, raw_max,
+             GOODIX_5E0A_WIDTH, GOODIX_5E0A_HEIGHT);
+  goodix5e0a_dump_debug_frame (raw_frame, self->latest_norm_pixels);
 
   /* Best-of-N frame banking: all touches (including enrollment) bank
    * GOODIX_5E0A_FRAMES_PER_TOUCH frames and select the winner; the
