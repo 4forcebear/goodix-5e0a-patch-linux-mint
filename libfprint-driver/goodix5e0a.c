@@ -38,6 +38,7 @@
 #include "goodix.h"
 #include "goodix_proto.h"
 #include "goodix5e0a.h"
+#include "goodix5e0a-image.h"
 #include "goodix_milan.h"
 
 
@@ -915,69 +916,6 @@ goodix5e0a_decode_frame (GoodixTls5xxPix *out_row_major, const guint8 *data, gui
   return pixel_idx;
 }
 
-static gboolean
-goodix5e0a_normalize_raw_frame (const GoodixTls5xxPix *pix, guint8 *out_norm,
-                                float *out_min, float *out_max)
-{
-  if (!pix || !out_norm)
-    return FALSE;
-
-  const int W = GOODIX_5E0A_WIDTH, H = GOODIX_5E0A_HEIGHT;
-  guint active = 0;
-
-  for (int i = 0; i < GOODIX_5E0A_FRAME_SIZE; i++)
-    if (pix[i] > 30)
-      active++;
-
-  if (active < 64)
-    {
-      memset (out_norm, 0, GOODIX_5E0A_FRAME_SIZE);
-      return FALSE;
-    }
-
-  g_autofree float *residual = g_new (float, GOODIX_5E0A_FRAME_SIZE);
-  float residual_min = G_MAXFLOAT, residual_max = -G_MAXFLOAT;
-
-  for (int y = 0; y < H; y++)
-    {
-      for (int x = 0; x < W; x++)
-        {
-          guint32 local_sum = 0;
-          guint local_count = 0;
-          for (int yy = MAX (0, y - 1); yy <= MIN (H - 1, y + 1); yy++)
-            for (int xx = MAX (0, x - 1); xx <= MIN (W - 1, x + 1); xx++)
-              {
-                local_sum += pix[yy * W + xx];
-                local_count++;
-              }
-
-          float value = pix[y * W + x] - (float) local_sum / local_count;
-          residual[y * W + x] = value;
-          residual_min = MIN (residual_min, value);
-          residual_max = MAX (residual_max, value);
-        }
-    }
-
-  float residual_range = residual_max - residual_min;
-  if (out_min)
-    *out_min = residual_min;
-  if (out_max)
-    *out_max = residual_max;
-
-  if (residual_range < 1.0f)
-    {
-      memset (out_norm, 0, GOODIX_5E0A_FRAME_SIZE);
-      return FALSE;
-    }
-
-  for (guint i = 0; i < GOODIX_5E0A_FRAME_SIZE; i++)
-    {
-      int value = (int) roundf (GOODIX_5E0A_NORMALIZE_MIDPOINT + residual[i] * GOODIX_5E0A_CONTRAST_GAIN);
-      out_norm[i] = (guint8) CLAMP (value, 0, 255);
-    }
-  return TRUE;
-}
-
 /* Ticket 39: drop any half-collected burst and zero the per-touch counters.
  * Called at touch start, claim entry, and every teardown path so a stale winner never leaks. */
 static void
@@ -1002,6 +940,15 @@ goodix5e0a_retry_enroll (FpDevice *dev, FpDeviceRetry retry)
   fpi_device_enroll_progress (dev, self->enroll_stage, NULL, fpi_device_retry_new (retry));
 }
 
+static void
+goodix5e0a_set_print_template (FpPrint *print, const guint8 *blob, gsize len)
+{
+  GVariant *bytes = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, blob, len, 1);
+  GVariant *data = g_variant_new ("(s@ay)", GOODIX_5E0A_PRINT_FORMAT, bytes);
+  fpi_print_set_type (print, FPI_PRINT_RAW);
+  g_object_set (print, "fpi-data", data, NULL);
+}
+
 static gconstpointer
 goodix5e0a_get_print_template (FpPrint *print, GVariant **out_var, gsize *out_len)
 {
@@ -1017,14 +964,29 @@ goodix5e0a_get_print_template (FpPrint *print, GVariant **out_var, gsize *out_le
   g_object_get (print, "fpi-data", &v, NULL);
   if (!v)
     return NULL;
-  gsize len = 0;
-  gconstpointer d = g_variant_get_fixed_array (v, &len, 1);
-  if (!d || len == 0)
+  if (!g_variant_is_of_type (v, G_VARIANT_TYPE ("(say)")))
     {
       g_variant_unref (v);
       return NULL;
     }
-  *out_var = v;
+  const gchar *format = NULL;
+  GVariant *bytes = NULL;
+  g_variant_get (v, "(&s@ay)", &format, &bytes);
+  gboolean compatible = g_str_equal (format, GOODIX_5E0A_PRINT_FORMAT);
+  g_variant_unref (v);
+  if (!compatible)
+    {
+      g_variant_unref (bytes);
+      return NULL;
+    }
+  gsize len = 0;
+  gconstpointer d = g_variant_get_fixed_array (bytes, &len, 1);
+  if (!d || len == 0)
+    {
+      g_variant_unref (bytes);
+      return NULL;
+    }
+  *out_var = bytes;
   if (out_len)
     *out_len = len;
   return d;
@@ -1175,11 +1137,7 @@ goodix5e0a_deliver_frame (FpDevice *dev)
             {
               FpPrint *print = NULL;
               fpi_device_get_enroll_data (dev, &print);
-              GVariant *blob_var = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
-                                                              packed_blob,
-                                                              packed_len, 1);
-              fpi_print_set_type (print, FPI_PRINT_RAW);
-              g_object_set (print, "fpi-data", blob_var, NULL);
+              goodix5e0a_set_print_template (print, packed_blob, packed_len);
               free (packed_blob);
               fp_dbg ("5e0a Milan enrollment committed successfully! (template size: %zu bytes)",
                       packed_len);
@@ -1936,8 +1894,11 @@ process_raw_frame (GoodixTls5xxPix * pix)
     return NULL;
 
   float residual_range = residual_max - residual_min;
-  g_message ("5e0a local contrast: min=%.2f max=%.2f range=%.2f window=3x3 gain=%.2f",
-             residual_min, residual_max, residual_range, GOODIX_5E0A_CONTRAST_GAIN);
+  g_message ("5e0a local contrast: min=%.2f max=%.2f range=%.2f bandpass=%dx%d-%dx%d target_rms=%.1f",
+             residual_min, residual_max, residual_range,
+             2 * GOODIX_5E0A_BANDPASS_SMOOTH_RADIUS + 1, 2 * GOODIX_5E0A_BANDPASS_SMOOTH_RADIUS + 1,
+             2 * GOODIX_5E0A_BANDPASS_BACKGROUND_RADIUS + 1, 2 * GOODIX_5E0A_BANDPASS_BACKGROUND_RADIUS + 1,
+             GOODIX_5E0A_BANDPASS_TARGET_RMS);
 
   /* Create the scaled 128x160 image directly via bilinear upscaling.
    * Use FPI_IMAGE_COLORS_INVERTED for capacitive ridges (high ADC = black).
@@ -2180,7 +2141,9 @@ dev_verify (FpDevice *dev)
   gconstpointer data = goodix5e0a_get_print_template (print, &fp_data, &data_len);
   if (!data)
     {
-      fpi_device_verify_complete (dev, fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
+      fpi_device_verify_complete (dev,
+                                  fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                                            "Fingerprint data is incompatible or invalid; enroll again"));
       return;
     }
 

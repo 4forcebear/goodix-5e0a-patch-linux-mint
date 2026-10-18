@@ -169,15 +169,15 @@ class TestM1C1LifecycleAdversarial(unittest.TestCase):
         self.assertIn("if (action == FPI_DEVICE_ACTION_ENROLL)", img_cb_body)
         self.assertIn("fpi_image_device_image_captured (dev);", img_cb_body)
 
-    def test_contrast_gain_calibration_value(self):
-        """Verify GOODIX_5E0A_CONTRAST_GAIN is calibrated to 1.5f for Milan matching engine."""
+    def test_bandpass_calibration_value(self):
+        """Verify the hardware-tested residual RMS is the production default."""
         with open(self.goodix5e0a_h, "r") as f:
             header_content = f.read()
-        self.assertIn("#define GOODIX_5E0A_CONTRAST_GAIN (1.5f)", header_content)
+        self.assertIn("#define GOODIX_5E0A_BANDPASS_TARGET_RMS (80.0f)", header_content)
 
-        with open(self.goodix5e0a_c, "r") as f:
+        with open(repo("libfprint-driver", "goodix5e0a-image.h"), "r") as f:
             source_content = f.read()
-        self.assertIn("residual[i] * GOODIX_5E0A_CONTRAST_GAIN", source_content)
+        self.assertIn("GOODIX_5E0A_BANDPASS_TARGET_RMS / residual_rms", source_content)
 
     # --------------------------------------------------------------------------
     # 4. Upstream Integration Boundary

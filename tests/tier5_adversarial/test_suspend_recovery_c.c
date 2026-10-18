@@ -279,8 +279,8 @@ static void test_public_idle_suspend (void)
   goodix5e0a_suspend (dev);
 }
 
-/* Test the actual normalizer included above, with independently calculated
- * values: an affine ramp has zero interior residual and clipped edge means. */
+/* Test the real normalizer with an affine ramp and an analytic impulse
+ * response. These synthetic pixels are not fingerprint accuracy fixtures. */
 static void test_frame_normalization (void)
 {
   GoodixTls5xxPix raw[64 * 80] = {0};
@@ -298,16 +298,11 @@ static void test_frame_normalization (void)
     for (int x = 0; x < 64; x++)
       raw[y * 64 + x] = 1000 + 6 * x + 12 * y;
   g_assert_true (goodix5e0a_normalize_raw_frame (raw, normalized, &low, &high));
-  g_assert_cmpfloat (low, ==, -9.0f);
-  g_assert_cmpfloat (high, ==, 9.0f);
-  for (int y = 0; y < 80; y++)
-    for (int x = 0; x < 64; x++)
-      {
-        float res = (x == 0 ? -3.0f : x == 63 ? 3.0f : 0.0f)
-                  + (y == 0 ? -6.0f : y == 79 ? 6.0f : 0.0f);
-        int expected = (int) roundf (GOODIX_5E0A_NORMALIZE_MIDPOINT + res * GOODIX_5E0A_CONTRAST_GAIN);
-        g_assert_cmpuint (normalized[y * 64 + x], ==, CLAMP (expected, 0, 255));
-      }
+  g_assert_cmpfloat_with_epsilon (low, -37.5f, .001f);
+  g_assert_cmpfloat_with_epsilon (high, 37.5f, .001f);
+  g_assert_cmpuint (normalized[40 * 64 + 32], ==, 128);
+  g_assert_cmpuint (normalized[0], ==, 0);
+  g_assert_cmpuint (normalized[64 * 80 - 1], ==, 255);
 
   for (guint i = 0; i < G_N_ELEMENTS (raw); i++)
     raw[i] = 1000;
@@ -319,9 +314,68 @@ static void test_frame_normalization (void)
       raw[40 * 64 + 32] = 1000 + delta;
       g_assert_true (goodix5e0a_normalize_raw_frame (raw, normalized, NULL, NULL));
       g_assert_cmpuint (normalized[40 * 64 + 32], ==, delta < 0 ? 0 : 255);
-      int expected = (int) roundf (GOODIX_5E0A_NORMALIZE_MIDPOINT - (delta / 9.0f) * GOODIX_5E0A_CONTRAST_GAIN);
-      g_assert_cmpuint (normalized[40 * 64 + 31], ==, CLAMP (expected, 0, 255));
+      /* Separable 3x3 and 11x11 box kernels: the impulse spreads over
+       * nine pixels, then its background spans 13x13. Away from frame
+       * edges the exact response is delta/9 * (small - overlap/121). */
+      double response[64 * 80], sum_sq = 0;
+      for (int y = 0; y < 80; y++)
+        for (int x = 0; x < 64; x++)
+          {
+            int dx = abs (x - 32), dy = abs (y - 40);
+            int nx = CLAMP (7 - dx, 0, 3), ny = CLAMP (7 - dy, 0, 3);
+            double value = delta / 9.0 * ((dx <= 1 && dy <= 1) - nx * ny / 121.0);
+            response[y * 64 + x] = value;
+            sum_sq += value * value;
+          }
+      double rms = sqrt (sum_sq / (64 * 80));
+      for (guint i = 0; i < G_N_ELEMENTS (raw); i++)
+        {
+          int expected = CLAMP ((int) round (128 + response[i] * 80 / rms), 0, 255);
+          g_assert_cmpint (abs ((int) normalized[i] - expected), <=, 1);
+        }
       g_assert_cmpuint (normalized[0], ==, 128);
+    }
+}
+
+static void test_print_processing_format (void)
+{
+  g_autoptr(FpDevice) dev = new_device ();
+  g_autoptr(FpPrint) print = fp_print_new (dev);
+  const guint8 payload[] = {1, 4, 9, 16};
+  g_autoptr(GVariant) held = NULL;
+  gsize len = 99;
+  goodix5e0a_set_print_template (print, payload, sizeof (payload));
+  const guint8 *bytes = goodix5e0a_get_print_template (print, &held, &len);
+  g_assert_cmpmem (bytes, len, payload, sizeof (payload));
+  g_clear_pointer (&held, g_variant_unref);
+
+  g_autofree guchar *serialized = NULL;
+  gsize serialized_len = 0;
+  g_autoptr(GError) error = NULL;
+  g_assert_true (fp_print_serialize (print, &serialized, &serialized_len, &error));
+  g_assert_no_error (error);
+  g_autoptr(FpPrint) restored = fp_print_deserialize (serialized, serialized_len, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (restored);
+  bytes = goodix5e0a_get_print_template (restored, &held, &len);
+  g_assert_cmpmem (bytes, len, payload, sizeof (payload));
+  g_clear_pointer (&held, g_variant_unref);
+
+  /* Untagged old prints, a different processing tag, malformed types and
+   * empty payloads must never reach Milan's template unpacker. */
+  GVariant *invalid[] = {
+    g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, payload, sizeof (payload), 1),
+    g_variant_new ("(s@ay)", "other-processing", g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, payload, sizeof (payload), 1)),
+    g_variant_new_string ("not a print"),
+    g_variant_new ("(s@ay)", GOODIX_5E0A_PRINT_FORMAT, g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, NULL, 0, 1)),
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (invalid); i++)
+    {
+      g_object_set (print, "fpi-data", invalid[i], NULL);
+      len = 99;
+      g_assert_null (goodix5e0a_get_print_template (print, &held, &len));
+      g_assert_null (held);
+      g_assert_cmpuint (len, ==, 0);
     }
 }
 
@@ -446,5 +500,6 @@ int main (int argc, char **argv)
   g_test_add_func ("/goodix/lifecycle/deactivate-mid-command-real-priv", test_deactivate_mid_command_real_priv);
   g_test_add_func ("/goodix/lifecycle/suspend-mid-command-real-priv", test_suspend_mid_command_real_priv);
   g_test_add_func ("/goodix/lifecycle/step-cb-cancelled-fails-fast", test_step_cb_cancelled_fails_fast);
+  g_test_add_func ("/goodix/prints/processing-format", test_print_processing_format);
   return g_test_run ();
 }

@@ -17,6 +17,17 @@ fprintd-enroll
 
 See `./install.sh --help` for custom DLL paths or uninstalling.
 
+### Upgrading from the previous matching pipeline
+
+Enroll your fingers again after upgrading to the band-pass/native-raster driver.
+Old saved prints use incompatible image processing and are rejected. Remove
+them through your desktop's fingerprint settings, then enroll again. With the
+command-line tools, `fprintd-delete "$USER"` removes your existing fingerprints;
+follow it with `fprintd-enroll` to create a new enrollment.
+
+The corrected processing is enabled by default; no experiment flag or Windows
+calibration export is needed. See [validation and scope](docs/native-raster-validation.md).
+
 ### NixOS
 
 ```nix
@@ -35,9 +46,10 @@ services.fprintd.goodix.pamServices = true;
 
 ## Enroll Fails?
 
-Many laptops lock the sensor with a unique hardware key during Windows setup. If `fprintd-enroll` fails with `enroll-unknown-error`, extract your laptop's key using **[docs/psk-extraction.md](docs/psk-extraction.md)**. 
+Many laptops lock the sensor with a unique hardware key during Windows setup. If `fprintd-enroll` fails with `enroll-unknown-error`, extract your laptop's key using **[docs/psk-extraction.md](docs/psk-extraction.md)**.
 
-## License
+## License and Credits
 
+- huge thanks to @ptrip7 for their help on the native raster experiments
 - Driver code: LGPL-2.1-or-later ([LICENSE](LICENSE)).
 - `GoodixEngineAdapter.dll`: Proprietary Goodix binary included for research.

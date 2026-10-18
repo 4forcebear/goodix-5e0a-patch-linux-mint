@@ -12,9 +12,8 @@ Verifies without hardware (hermetic static & structural validation):
     fallback;
 (b) the pre-existing reset hygiene sites (claim, SSM completion, scan start,
     deactivate, suspend, both enroll rejection paths) are all still present;
-(c) the contrast gain is NOT part of this fix: ticket 78 falsified gain as
-    the live cause ("do NOT re-litigate"), and the native normalization
-    harness pins gain-1.0 values.
+(c) production normalization uses the issue-12 hardware-tested residual RMS
+    target. Its numerical behavior is checked by the native frame harness.
 """
 
 import os
@@ -72,9 +71,9 @@ class TestF101PerTouchBurst(unittest.TestCase):
         self.assertIn("a stale burst winner must never survive across claims",
                       self.src_c.lower())
 
-    def test_contrast_gain_calibrated(self):
-        """(c) Gain is calibrated to 1.5f for Milan matching engine (Ticket 104)."""
-        self.assertIn("#define GOODIX_5E0A_CONTRAST_GAIN (1.5f)", self.src_h)
+    def test_bandpass_rms_calibrated(self):
+        """(c) Residual RMS is the hardware-tested band-pass value."""
+        self.assertIn("#define GOODIX_5E0A_BANDPASS_TARGET_RMS (80.0f)", self.src_h)
 
 
 if __name__ == "__main__":

@@ -45,8 +45,8 @@ typedef uint64_t u64;
 
 typedef struct __attribute__((packed)) {
     uint8_t *data;          /* +0x00: pointer to 8-bit pixels */
-    int16_t width;          /* +0x08: 64 */
-    int16_t height;         /* +0x0a: 80 */
+    int16_t width;          /* +0x08: 80 (profile 10) */
+    int16_t height;         /* +0x0a: 64 (profile 10) */
     int16_t reserved1;      /* +0x0c: 0 */
     uint8_t bits;           /* +0x0e: 8 */
     uint8_t channels;       /* +0x0f: 1 */
@@ -1115,7 +1115,7 @@ gboolean goodix_milan_init (const char *dll_path) {
 
     ensure_gs();
     m_getAlgorithmVersion(g_milan_version);
-    m_ppp_param_init(10); /* 64x80 sensor initialization */
+    m_ppp_param_init(10); /* Profile 10: 64 rows, 80 columns */
 
     g_message("5e0a: Milan biometric matching engine loaded successfully (%s)", g_milan_version);
     g_milan_available = TRUE;
@@ -1127,7 +1127,7 @@ const char *goodix_milan_get_version (void) {
     return g_milan_version;
 }
 
-static void make_goodix_image(GoodixImage *img, const uint8_t *pix, int width, int height, int sensor_type) {
+static guint8 *make_goodix_image(GoodixImage *img, const uint8_t *pix, int width, int height, int sensor_type) {
     memset(img, 0, sizeof(GoodixImage));
     img->data = (uint8_t*)pix;
     img->width = width;
@@ -1138,6 +1138,17 @@ static void make_goodix_image(GoodixImage *img, const uint8_t *pix, int width, i
     img->sensor_type = sensor_type;
     img->quality = 100;
     img->overlap = 100;
+    /* Profile 10 consumes 64 rows of 80 columns. Callers keep the sensor's
+     * canonical 64-wide, 80-high raster; transpose only at this boundary.
+     * The caller owns the returned buffer through the engine call. */
+    guint8 *native = g_malloc(width * height);
+    for (int y = 0; y < height; y++)
+        for (int x = 0; x < width; x++)
+            native[x * height + y] = pix[y * width + x];
+    img->data = native;
+    img->width = height;
+    img->height = width;
+    return native;
 }
 
 /* Ticket 76: native quality probe. Ticket-72 offline ranges: good
@@ -1152,9 +1163,8 @@ guint goodix_milan_frame_quality (const uint8_t *pixels,
                                   guint *out_overlap) {
     if (out_quality) *out_quality = 0;
     if (out_overlap) *out_overlap = 0;
-    /* Engine geometry is fixed 64x80 (ppp_param_init(10)); anything else
-     * falls back to the legacy proxy rather than feeding the engine a shape
-     * it never saw in the ticket-72 shootout. */
+    /* Only canonical 64x80 sensor inputs are supported. The shared bridge
+     * converts them to profile 10's 80x64 engine raster. */
     if (!pixels || width != 64 || height != 80)
         return 0;
     g_rec_mutex_lock (&g_milan_mutex);
@@ -1165,7 +1175,7 @@ guint goodix_milan_frame_quality (const uint8_t *pixels,
     ensure_gs();
 
     GoodixImage img;
-    make_goodix_image(&img, pixels, width, height, 10);
+    g_autofree guint8 *image_storage = make_goodix_image(&img, pixels, width, height, 10);
     u32 qout[2] = {0};
     m_getQuality(&img, qout);
 
@@ -1204,7 +1214,7 @@ int goodix_milan_enroll_add_image (void *ctx,
     ensure_gs();
 
     GoodixImage img;
-    make_goodix_image(&img, pixels, width, height, 10);
+    g_autofree guint8 *image_storage = make_goodix_image(&img, pixels, width, height, 10);
     u32 status_out[2] = {0};
 
     int add_res = m_enrolAddImage(ctx, &img, NULL, NULL, 0, status_out);
@@ -1287,7 +1297,7 @@ int goodix_milan_verify_image (const uint8_t *pixels,
     }
 
     GoodixImage probe;
-    make_goodix_image(&probe, pixels, width, height, 10);
+    g_autofree guint8 *image_storage = make_goodix_image(&probe, pixels, width, height, 10);
     void *active_templates[1] = { unpacked_template };
     int matched_idx = -999;
     int match_score = -999;
@@ -1326,6 +1336,7 @@ int goodix_milan_identify_image (const uint8_t *pixels,
     g_rec_mutex_lock (&g_milan_mutex);
     ensure_gs();
 
+    g_autofree guint8 *image_storage = NULL;
     void **unpacked = g_new0 (void *, n_templates);
     for (int i = 0; i < n_templates; i++) {
         if (!template_blobs[i] || template_lens[i] == 0) goto fail_closed;
@@ -1335,7 +1346,7 @@ int goodix_milan_identify_image (const uint8_t *pixels,
     }
 
     GoodixImage probe;
-    make_goodix_image(&probe, pixels, width, height, 10);
+    image_storage = make_goodix_image(&probe, pixels, width, height, 10);
     int matched_idx = -999, match_score = -999;
     u32 details[2] = {0};
     m_identifyImage (&probe, NULL, unpacked, n_templates,

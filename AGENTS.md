@@ -22,5 +22,5 @@
 
 - The driver is committed fully to the Goodix Milan matching engine (`GoodixEngineAdapter.dll` via in-process PE loader `goodix_milan.c`).
 - All legacy NBIS / Bozorth3 minutiae counting and fallback heuristics have been stripped.
-- Sensor raster is canonical 64x80 with 3x3 local-mean residual normalization (midpoint 128, gain 1.5).
+- Sensor raster is canonical 64x80 with 3x3 smoothing minus an 11x11 background, residual RMS target 80 and midpoint 128. Only the Milan bridge transposes to the engine's 80x64 raster.
 - Enrollment target is 12 touches (`*(ctx+8) = 12`, 12 enrollment stages).
