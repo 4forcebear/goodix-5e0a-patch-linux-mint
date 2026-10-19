@@ -15,52 +15,64 @@ hardware-verified on a Realme Book 14 i5 running Linux Mint. The repository
 includes the required `GoodixEngineAdapter.dll`; the installer builds the
 private libfprint driver and installs it for `fprintd`.
 
-1. Confirm the architecture and sensor:
+#### One-command setup
 
-   ```bash
-   uname -m
-   lsusb -d 27c6:5e0a
-   ```
+First confirm the system is x86_64 and has the supported sensor:
 
-   `uname -m` should report `x86_64`, and `lsusb` should list the sensor. Install `usbutils` if `lsusb` is missing.
+```bash
+uname -m
+lsusb -d 27c6:5e0a
+```
 
-2. Clone and install. Run `install.sh` as your normal user, without `sudo`;
-   it will request sudo when it installs packages and files.
+Run the installer as your normal user, without `sudo`. This command uses the
+pinned `v1.0.1` release archive and hands off to the checked installer:
 
-   ```bash
-   sudo apt install git
-   git clone https://github.com/jitendradara12/goodix-5e0a.git
-   cd goodix-5e0a
-   ./install.sh
-   ./install.sh --verify-install
-   sudo systemctl restart fprintd
-   ```
+```bash
+set -o pipefail
+curl -fsSL https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.1/easy-install.sh | bash
+```
 
-   The installer checks its files and the effective systemd configuration after
-   installation. `--verify-install` repeats that read-only check later; it does
-   not probe the sensor or test enrollment/matching.
+For a full checkout instead of the bootstrap:
 
-3. Enroll and verify before changing login authentication:
+```bash
+git clone --branch v1.0.1 --depth 1 https://github.com/4forcebear/goodix-5e0a-patch-linux-mint.git
+cd goodix-5e0a-patch-linux-mint
+./install.sh
+./install.sh --verify-install
+```
 
-   ```bash
-   fprintd-enroll -f right-index-finger "$USER"
-   fprintd-verify -f right-index-finger "$USER"
-   ```
+The bootstrap requires `curl` and `tar`. To inspect it before running:
 
-   Follow the prompts until enrollment completes, then verify with the same
-   finger. This driver uses 24 accepted enrollment touches.
+```bash
+curl -fsSLO https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.1/easy-install.sh
+less easy-install.sh
+bash easy-install.sh
+```
 
-4. Optional: enable fingerprint authentication in PAM. Keep the password
-   authentication option enabled as a fallback.
+After installation, restart `fprintd`, then enroll and verify the same finger:
 
-   ```bash
-   ./install.sh --pam
-   ```
+```bash
+sudo systemctl restart fprintd
+fprintd-enroll -f right-index-finger "$USER"
+fprintd-verify -f right-index-finger "$USER"
+```
 
-   The flag creates a root-only backup of the current PAM files and configures three fingerprint attempts. It preserves the Unix-password fallback; log out and back in to try fingerprint authentication.
-   Desktop lock screens and `sudo` can use different PAM stacks; test each
-   separately and keep password login available. An encrypted home directory
-   using eCryptfs may still require the account password at graphical login.
+This driver uses 24 accepted enrollment touches. Enable optional PAM only after
+enrollment and matching work; keep password authentication enabled as fallback:
+
+```bash
+set -o pipefail
+curl -fsSL https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.1/easy-install.sh | bash -s -- --pam
+```
+
+This creates a root-only backup of the PAM files, sets three fingerprint
+attempts, and keeps the Unix-password fallback. Desktop login, lock screens,
+and `sudo` use different PAM stacks; test them separately. An eCryptfs home
+may still require the account password at graphical login.
+
+The bootstrap forwards installer options. Its `--uninstall` option uses the
+standalone checked uninstaller; `--uninstall --check` runs its read-only
+preflight.
 
 For a custom sensor key or a `bad record MAC` error, follow
 [PSK extraction](docs/psk-extraction.md).

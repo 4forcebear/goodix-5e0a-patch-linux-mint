@@ -461,7 +461,11 @@ main() (
     echo 'Non-NixOS end-to-end operation is unverified. Keep password login available.'
     echo 'When ready: sudo systemctl restart fprintd; then fprintd-enroll and fprintd-verify.'
     integration_hints
-    printf 'Uninstall with preflight and postflight checks: %q\n' "$script_dir/uninstall.sh"
+    if [[ ${GOODIX_EASY_INSTALLER:-0} == 1 ]]; then
+        printf 'Uninstall with checked removal: %s\n' "${GOODIX_EASY_UNINSTALL_COMMAND:-easy-install.sh --uninstall}"
+    else
+        printf 'Uninstall with preflight and postflight checks: %q\n' "$script_dir/uninstall.sh"
+    fi
     echo 'Uninstall preserves enrolled prints and installed distro packages.'
 )
 
