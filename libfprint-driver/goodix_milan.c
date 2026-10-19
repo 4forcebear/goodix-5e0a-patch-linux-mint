@@ -1198,7 +1198,7 @@ void *goodix_milan_enroll_start (int *max_images) {
         return NULL;
     }
     if (max_images) *max_images = max_imgs;
-    *(u16*)((char*)ctx + 8) = 12; /* Target 12 enrollment touches */
+    *(u16*)((char*)ctx + 8) = GOODIX_MILAN_ENROLL_TOUCHES; /* Accepted touches only */
     g_rec_mutex_unlock (&g_milan_mutex);
     return ctx;
 }

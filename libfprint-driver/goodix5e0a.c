@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include "goodix5e0a_calibration.h"
 
 #define FP_COMPONENT "goodixtls5e0a"
 
@@ -99,6 +100,10 @@ struct _FpiDeviceGoodixTls5e0a
   gboolean              warm_retried;
   gint64                last_clean_boot;
 
+  guint8                calibrated_config[256];
+  guint8                calibrated_down[35];
+  guint8                calibrated_up[35];
+
   /* Best-of-N per-touch state */
   guint               frame_count;
   guint               best_frame_no;
@@ -113,6 +118,7 @@ struct _FpiDeviceGoodixTls5e0a
   /* Ticket 73 + 77: Milan enrollment, verify and identify state */
   gboolean            is_verify;
   gboolean            is_identify;
+  gboolean            enroll_abort_requested;
   guint               enroll_stage;
   void               *milan_enrol_ctx;
   guint8             *tmpl_blob;
@@ -176,6 +182,42 @@ on_psk_hash_read (FpDevice *dev, gboolean success, guint32 flags,
 }
 
 static void
+on_device_otp (FpDevice *dev, guint8 *data, guint16 len,
+               gpointer ssm, GError *error)
+{
+  FpiDeviceGoodixTls5e0a *self = FPI_DEVICE_GOODIXTLS5E0A (dev);
+  if (error)
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  memcpy (self->calibrated_config, goodix_5e0a_config,
+          sizeof (self->calibrated_config));
+  guint8 capture[10];
+  guint16 tcode = 0;
+  if (!goodix5e0a_calibrate (data, len, self->calibrated_config,
+                             capture, &tcode))
+    {
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                                     "Invalid Goodix sensor calibration"));
+      return;
+    }
+
+  memcpy (self->calibrated_down, goodix_5e0a_down_s12,
+          sizeof (self->calibrated_down));
+  memcpy (self->calibrated_up, goodix_5e0a_up_u01,
+          sizeof (self->calibrated_up));
+  memcpy (self->calibrated_down + 2, capture + 2, 8);
+  memcpy (self->calibrated_down + 26, capture + 2, 8);
+  memcpy (self->calibrated_up + 2, capture + 2, 8);
+  g_message ("5e0a OTP calibration: tcode=%u DAC=%u/%u/%u/%u (CRC valid)",
+             tcode, capture[2], capture[4], capture[6], capture[8]);
+  fpi_ssm_next_state (ssm);
+}
+
+static void
 activate_run_state (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceGoodixTls5e0a *self = FPI_DEVICE_GOODIXTLS5E0A (dev);
@@ -190,7 +232,7 @@ activate_run_state (FpiSsm *ssm, FpDevice *dev)
 
     case ACTIVATE_RESET:
       /* Ticket 45: 5e0a relies on USB reset rather than MCU command 0xa2. */
-      fpi_ssm_jump_to_state (ssm, ACTIVATE_CHECK_FW_VER);
+      fpi_ssm_jump_to_state (ssm, ACTIVATE_READ_OTP);
       break;
 
     case ACTIVATE_READ_CHIP_ID:
@@ -208,7 +250,7 @@ activate_run_state (FpiSsm *ssm, FpDevice *dev)
           fpi_ssm_jump_to_state (ssm, ACTIVATE_CHECK_FW_VER);
           return;
         }
-      goodix_send_read_otp (dev, goodixtls5xx_check_none_cmd, ssm);
+      goodix_send_read_otp (dev, on_device_otp, ssm);
       break;
 
     case ACTIVATE_CHECK_FW_VER:
@@ -490,8 +532,8 @@ on_tls_activation_complete (FpDevice *dev, gpointer user_data, GError *error)
   else
     {
       fp_dbg ("Cold path — uploading config after TLS...");
-      goodix_send_upload_config_mcu (dev, (guint8 *) goodix_5e0a_config,
-                                     sizeof (goodix_5e0a_config), NULL,
+      goodix_send_upload_config_mcu (dev, self->calibrated_config,
+                                     sizeof (self->calibrated_config), NULL,
                                      on_post_tls_config_uploaded,
                                      GUINT_TO_POINTER (goodix_activation_gen_get (dev)));
     }
@@ -797,7 +839,7 @@ goodix5e0a_on_down_poll_timeout (FpDevice *dev, gpointer user_data)
     return;
 
   send_cmd_reply (dev, GOODIX_CMD_MCU_SWITCH_TO_FDT_DOWN,
-                  goodix_5e0a_down_s12, sizeof (goodix_5e0a_down_s12),
+                  self->calibrated_down, sizeof (self->calibrated_down),
                   0, goodix5e0a_on_fdt_down_reply, self->scan_ssm);
 }
 
@@ -1098,6 +1140,7 @@ goodix5e0a_deliver_frame (FpDevice *dev)
       if (!self->milan_enrol_ctx)
         {
           fp_err ("5e0a enroll: missing Milan context");
+          self->enroll_abort_requested = TRUE;
           fpi_device_enroll_complete (dev, NULL, fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
           return;
         }
@@ -1114,16 +1157,37 @@ goodix5e0a_deliver_frame (FpDevice *dev)
               add_res, enrolled_count, progress_pct,
               self->enroll_stage + 1, FP_DEVICE_GET_CLASS (dev)->nr_enroll_stages);
 
-      if (add_res != 0)
+      if (add_res != 0 || enrolled_count == (int) self->enroll_stage)
         {
-          fp_dbg ("5e0a enrollment touch rejected by Milan engine (res=%d)", add_res);
+          fp_dbg ("5e0a enrollment touch rejected by Milan engine (res=%d count=%d expected=%u)",
+                  add_res, enrolled_count, self->enroll_stage);
+          if (enrolled_count != (int) self->enroll_stage)
+            {
+              g_clear_pointer (&self->milan_enrol_ctx, goodix_milan_enroll_finish);
+              self->enroll_abort_requested = TRUE;
+              fpi_device_enroll_complete (dev, NULL,
+                                          fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                                    "Milan enrollment count changed after a rejected image"));
+              return;
+            }
           goodix5e0a_reset_touch_frames (self);
-          fpi_device_enroll_progress (dev, self->enroll_stage, NULL,
-                                      fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
+          goodix5e0a_retry_enroll (dev, FP_DEVICE_RETRY_CENTER_FINGER);
           return;
         }
 
-      self->enroll_stage++;
+      if (enrolled_count != (int) self->enroll_stage + 1)
+        {
+          g_clear_pointer (&self->milan_enrol_ctx, goodix_milan_enroll_finish);
+          self->enroll_abort_requested = TRUE;
+          fpi_device_enroll_complete (dev, NULL,
+                                      fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                                "Milan enrollment count out of sync"));
+          return;
+        }
+      self->enroll_stage = enrolled_count;
+      g_message ("5e0a enroll accepted: accepted=%u/%d progress=%d%% remaining=%u",
+                 self->enroll_stage, GOODIX_MILAN_ENROLL_TOUCHES, progress_pct,
+                 GOODIX_MILAN_ENROLL_TOUCHES - self->enroll_stage);
       fpi_device_enroll_progress (dev, self->enroll_stage, NULL, NULL);
 
       if (self->enroll_stage >= FP_DEVICE_GET_CLASS (dev)->nr_enroll_stages)
@@ -1313,6 +1377,17 @@ goodix5e0a_on_read_img (FpDevice *dev, guint8 *data, guint16 len,
 choose_best:
   if (action == FPI_DEVICE_ACTION_ENROLL)
     {
+      /* APP_10034 can report a full-range baseline frame as a false touch.
+       * Do not feed it to Milan: it can produce a template that never matches. */
+      if (self->best_active >= 5000 && self->best_range >= 1800)
+        {
+          g_message ("5e0a baseline frame rejected as false touch: active=%u range=%u",
+                     self->best_active, self->best_range);
+          goodix5e0a_reset_touch_frames (self);
+          goodix5e0a_retry_enroll (dev, FP_DEVICE_RETRY_TOO_SHORT);
+          fpi_ssm_next_state (ssm);
+          return;
+        }
       if (self->best_active < 64 || self->best_frame_no == 0)
         {
           g_message ("5e0a enrollment touch rejected: active=%u (press firmer)",
@@ -1344,6 +1419,15 @@ deliver:
 
   if (self->scan_ssm != ssm)
     return;
+
+  if (self->enroll_abort_requested)
+    {
+      self->enroll_abort_requested = FALSE;
+      self->scan_ssm = NULL;
+      fpi_image_device_report_finger_status (FP_IMAGE_DEVICE (dev), FALSE);
+      fpi_ssm_mark_completed (ssm);
+      return;
+    }
 
   if (action != FPI_DEVICE_ACTION_ENROLL || self->enroll_stage >= FP_DEVICE_GET_CLASS (dev)->nr_enroll_stages)
     {
@@ -1406,35 +1490,45 @@ goodix5e0a_keep_best_frame (FpDevice *dev, gpointer ssm,
       memcpy (self->best_pixels, self->latest_norm_pixels, GOODIX_5E0A_FRAME_SIZE);
     }
 
-  /* Ticket 84: Optimistic Verify Fast-Path (Sub-50ms Post-Touch Unlock Latency).
-   * During non-enroll actions (verify or identify), if frame 1 has strong contact
-   * (active >= 1500 and range >= 500) and matches immediately, deliver it at once
-   * instead of waiting for the remaining 3 burst frames. */
+  /* Check every strong verify frame against the stored print. Image quality
+   * ranks ridge clarity but does not replace the Milan match decision. */
   FpiDeviceAction action = fpi_device_get_current_action (dev);
   if ((action == FPI_DEVICE_ACTION_VERIFY || self->is_verify ||
        action == FPI_DEVICE_ACTION_IDENTIFY || self->is_identify) &&
-      self->frame_count == 1 && active >= 1500 && range >= 500)
+      active >= 1500 && range >= 500)
     {
       if (self->is_verify || action == FPI_DEVICE_ACTION_VERIFY)
         {
           if (self->tmpl_blob != NULL && self->tmpl_len > 0)
             {
               int match_pts = 0;
-              goodix_milan_verify_image (self->best_pixels,
-                                         GOODIX_5E0A_WIDTH,
-                                         GOODIX_5E0A_HEIGHT,
-                                         self->tmpl_blob,
-                                         self->tmpl_len,
-                                         &match_pts);
-              if (match_pts > 0)
+              int matched = goodix_milan_verify_image (self->latest_norm_pixels,
+                                                       GOODIX_5E0A_WIDTH,
+                                                       GOODIX_5E0A_HEIGHT,
+                                                       self->tmpl_blob,
+                                                       self->tmpl_len,
+                                                       &match_pts);
+              g_message ("5e0a verify frame %u/%u: match=%d pts=%d",
+                         self->frame_count, (guint) GOODIX_5E0A_FRAMES_PER_TOUCH,
+                         matched, match_pts);
+              if (matched)
                 {
-                  g_message ("5e0a optimistic fast-path match on frame 1: pts=%d, skipping remaining burst",
+                  self->best_frame_no = self->frame_count;
+                  self->best_quality = quality;
+                  self->best_overlap = overlap;
+                  self->best_range = range;
+                  self->best_active = active;
+                  memcpy (self->best_pixels, self->latest_norm_pixels,
+                          GOODIX_5E0A_FRAME_SIZE);
+                  g_message ("5e0a verify matched frame %u/%u: pts=%d",
+                             self->frame_count, (guint) GOODIX_5E0A_FRAMES_PER_TOUCH,
                              match_pts);
                   return FALSE;
                 }
             }
         }
-      else if (self->is_identify || action == FPI_DEVICE_ACTION_IDENTIFY)
+      else if ((self->is_identify || action == FPI_DEVICE_ACTION_IDENTIFY) &&
+               self->frame_count == 1)
         {
           GPtrArray *prints = NULL;
           fpi_device_get_identify_data (dev, &prints);
@@ -1524,7 +1618,7 @@ goodix5e0a_on_fdt_up_reply (FpDevice *dev, guint8 *data, guint16 len,
           g_error_free (err);
           fp_dbg ("5e0a retry guard: finger still present, re-issuing FDT UP");
           send_cmd_reply (dev, GOODIX_CMD_MCU_SWITCH_TO_FDT_UP,
-                          goodix_5e0a_up_u01, sizeof (goodix_5e0a_up_u01),
+                          self->calibrated_up, sizeof (self->calibrated_up),
                           GOODIX_5E0A_FDT_UP_GUARD_TIMEOUT_MS, goodix5e0a_on_fdt_up_reply, ssm);
           return;
         }
@@ -1588,7 +1682,7 @@ goodix5e0a_scan_run_state (FpiSsm *ssm, FpDevice *dev)
     case SCAN_5E0A_FDT_DOWN:
       self->down_empty_polls = 0;
       send_cmd_reply (dev, GOODIX_CMD_MCU_SWITCH_TO_FDT_DOWN,
-                      goodix_5e0a_down_s12, sizeof (goodix_5e0a_down_s12),
+                      self->calibrated_down, sizeof (self->calibrated_down),
                       0, goodix5e0a_on_fdt_down_reply, ssm);
       break;
 
@@ -1598,7 +1692,7 @@ goodix5e0a_scan_run_state (FpiSsm *ssm, FpDevice *dev)
 
     case SCAN_5E0A_FDT_UP_1:
       send_cmd_noreply (dev, GOODIX_CMD_MCU_SWITCH_TO_FDT_UP,
-                        goodix_5e0a_up_u01, sizeof (goodix_5e0a_up_u01),
+                        self->calibrated_up, sizeof (self->calibrated_up),
                         goodix5e0a_step_cb, ssm);
       break;
 
@@ -1610,7 +1704,7 @@ goodix5e0a_scan_run_state (FpiSsm *ssm, FpDevice *dev)
 
     case SCAN_5E0A_FDT_UP_2:
       send_cmd_reply (dev, GOODIX_CMD_MCU_SWITCH_TO_FDT_UP,
-                      goodix_5e0a_up_u01, sizeof (goodix_5e0a_up_u01),
+                      self->calibrated_up, sizeof (self->calibrated_up),
                       self->retry_guard ? GOODIX_5E0A_FDT_UP_GUARD_TIMEOUT_MS : GOODIX_5E0A_FDT_UP_TIMEOUT_MS, goodix5e0a_on_fdt_up_reply, ssm);
       break;
     }
@@ -1782,6 +1876,7 @@ fpi_device_goodixtls5e0a_init (FpiDeviceGoodixTls5e0a *self)
   self->retry_guard_mono = 0;
   self->is_verify = FALSE;
   self->is_identify = FALSE;
+  self->enroll_abort_requested = FALSE;
   self->enroll_stage = 0;
   self->milan_enrol_ctx = NULL;
   self->tmpl_blob = NULL;
@@ -1964,6 +2059,7 @@ goodix5e0a_suspend (FpDevice *dev)
   self->retry_guard_mono = 0;
   self->session_started = FALSE;
   self->is_verify = self->is_identify = FALSE;
+  self->enroll_abort_requested = FALSE;
   g_clear_pointer (&self->tmpl_blob, g_free);
   self->tmpl_len = 0;
   g_clear_pointer (&self->milan_enrol_ctx, goodix_milan_enroll_finish);
@@ -2076,6 +2172,7 @@ dev_close (FpDevice *dev)
 
   self->is_verify = FALSE;
   self->is_identify = FALSE;
+  self->enroll_abort_requested = FALSE;
   g_clear_pointer (&self->milan_enrol_ctx, goodix_milan_enroll_finish);
   g_clear_pointer (&self->tmpl_blob, g_free);
   self->tmpl_len = 0;
@@ -2109,6 +2206,7 @@ dev_enroll (FpDevice *dev)
 
   self->is_verify = FALSE;
   self->is_identify = FALSE;
+  self->enroll_abort_requested = FALSE;
   self->enroll_stage = 0;
   g_clear_pointer (&self->milan_enrol_ctx, goodix_milan_enroll_finish);
 
@@ -2178,6 +2276,7 @@ dev_cancel (FpDevice *dev)
   fp_dbg ("5e0a dev_cancel requested");
   self->is_verify = FALSE;
   self->is_identify = FALSE;
+  self->enroll_abort_requested = FALSE;
   g_clear_pointer (&self->tmpl_blob, g_free);
   self->tmpl_len = 0;
   g_clear_pointer (&self->milan_enrol_ctx, goodix_milan_enroll_finish);

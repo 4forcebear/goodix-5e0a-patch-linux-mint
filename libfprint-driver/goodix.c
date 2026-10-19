@@ -903,7 +903,7 @@ goodix_send_nop (FpDevice *dev, GoodixNoneCallback callback,
                         NULL, FALSE, GOODIX_NOP_TIMEOUT, FALSE, NULL, NULL);
 }
 
-guint8 goodix5e0a_capture_payload[10] = {0x05, 0x00, 0xb0, 0x00, 0xb2, 0x00, 0xb0, 0x00, 0xb1, 0x00};
+
 
 void
 goodix_send_mcu_get_image (FpDevice *dev, GoodixImageCallback callback,
@@ -916,8 +916,16 @@ goodix_send_mcu_get_image (FpDevice *dev, GoodixImageCallback callback,
 
   if (g_strcmp0 (fp_device_get_driver (dev), "goodixtls5e0a") == 0)
     {
-      payload = goodix5e0a_capture_payload;
-      len = sizeof (goodix5e0a_capture_payload);
+      payload = g_object_get_data (G_OBJECT (dev), "goodix5e0a-capture-payload");
+      if (!payload)
+        {
+          if (callback)
+            callback (dev, NULL, 0, user_data,
+                      fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                                "Missing Goodix sensor calibration"));
+          return;
+        }
+      len = 10;
     }
 
   if (callback)
