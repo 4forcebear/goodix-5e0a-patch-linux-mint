@@ -52,6 +52,8 @@ uninstall_files() (
     rmdir -- "$dropdir" 2>/dev/null || true # Preserve any drop-ins added afterwards.
     rm -rf -- "$prefix"
     systemctl daemon-reload
+    [[ ! -e "$prefix" && ! -L "$prefix" ]] || { fail "Private install remains after uninstall: $prefix"; exit 1; }
+    [[ ! -e "$dropdir/90-goodix.conf" && ! -L "$dropdir/90-goodix.conf" ]] || { fail 'Owned systemd drop-in remains after uninstall'; exit 1; }
 )
 
 build_stage() (
@@ -83,12 +85,15 @@ build_stage() (
 )
 
 usage() {
-    echo 'Usage: ./install.sh [--no-deps] [--dll FILE] [--build-only DIRECTORY] | --check | --uninstall | --integrate | --help'
+    echo 'Usage: ./install.sh [--no-deps] [--dll FILE] [--build-only DIRECTORY] | --check | --verify-install | --uninstall | --integrate | --pam | --help'
     echo 'Run as your normal user. Default: private /opt install for systemd and root-run fprintd.'
     echo '--no-deps: use installed dependencies on any distro; no package manager calls.'
     echo '--build-only DIRECTORY: build a staging tree without sudo, systemd, or package installation.'
-    echo '--check: read-only runtime and desktop setup hints; does not test hardware.'
-    echo 'No automatic restart, PAM changes, or --no-timeout override. Uninstall preserves prints and distro packages.'
+    echo '--check: read-only host setup hints; does not test hardware.'
+    echo '--verify-install: verify owned files and effective systemd configuration; no hardware test.'
+    echo '--uninstall: remove only an intact, marked private install; preserve templates and distro packages.'
+    echo '--pam: opt-in Debian/Ubuntu PAM setup; backs up the stack and sets fingerprint max-tries=3.'
+    echo 'Default install does not change PAM; --pam is opt-in. No automatic restart or --no-timeout override. Uninstall preserves prints and distro packages.'
 }
 
 integration_hints() {
@@ -118,7 +123,7 @@ integration_hints() {
         echo 'Log out/in, then GNOME Settings > Users > Fingerprint Login. Other desktops vary.'
     else
         echo 'Desktop/login setup is separate: install your distro pam_fprintd module and follow its PAM documentation.'
-        echo 'Debian/Ubuntu: sudo apt install libpam-fprintd; sudo pam-auth-update'
+        echo 'Debian/Ubuntu: run ./install.sh --pam to enable fingerprint PAM with three attempts.'
     fi
 }
 
@@ -157,6 +162,107 @@ apply_integration() (
     fi
 )
 
+apply_pam() (
+    set -euo pipefail
+    local ID='' ID_LIKE='' backup_dir='' pam_file=/etc/pam.d/common-auth
+    # shellcheck disable=SC1091
+    if [[ -r /etc/os-release ]]; then . /etc/os-release; fi
+    case " $ID $ID_LIKE " in
+        *' debian '*|*' ubuntu '*) ;;
+        *) fail '--pam currently supports Debian/Ubuntu-based systems only'; exit 1 ;;
+    esac
+    [[ $EUID != 0 ]] || { fail 'Run ./install.sh --pam as your normal user, without sudo'; exit 1; }
+    for tool in sudo dpkg-query pam-auth-update python3; do
+        command -v "$tool" >/dev/null || { fail "Required command missing: $tool"; exit 1; }
+    done
+    [[ -r $pam_file ]] || { fail "PAM file missing: $pam_file"; exit 1; }
+
+    backup_dir="/var/backups/goodix-5e0a-pam-$(date +%Y%m%d-%H%M%S)"
+    [[ ! -e $backup_dir ]] || { fail "PAM backup already exists: $backup_dir"; exit 1; }
+    sudo install -d -m 0700 "$backup_dir"
+    sudo cp -a /etc/pam.d/common-* "$backup_dir/"
+    if sudo test -f /var/lib/pam/seen; then
+        sudo cp -a /var/lib/pam/seen "$backup_dir/pam-seen"
+    fi
+    echo "PAM backup saved at $backup_dir"
+
+    if ! dpkg-query -s libpam-fprintd 2>/dev/null | grep -q '^Status: install ok installed$'; then
+        sudo apt-get update
+        sudo apt-get install -y libpam-fprintd
+    fi
+    [[ -r /usr/share/pam-configs/fprintd ]] || {
+        fail 'libpam-fprintd did not provide the fprintd PAM profile'
+        exit 1
+    }
+    if ! grep -Eq '^[[:space:]]*auth[[:space:]].*pam_fprintd\.so' "$pam_file"; then
+        # Never use --force: preserve locally customized PAM stacks.
+        sudo env DEBIAN_FRONTEND=noninteractive pam-auth-update --enable fprintd
+    fi
+
+    sudo python3 - "$pam_file" <<'PYTHON'
+import os
+import re
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+path = Path(sys.argv[1])
+st = path.stat()
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+active_auth = [
+    i for i, line in enumerate(lines)
+    if re.match(r"^[ \t]*auth(?:[ \t]|$)", line)
+    and not line.lstrip().startswith("#")
+    and "pam_fprintd.so" in line
+]
+if len(active_auth) != 1:
+    raise SystemExit(
+        "Expected exactly one active pam_fprintd.so rule in common-auth; "
+        "left PAM unchanged. If pam-auth-update declined local edits, "
+        "review the saved backup and configure the profile manually."
+    )
+if not any(
+    re.match(r"^[ \t]*auth(?:[ \t]|$)", line)
+    and not line.lstrip().startswith("#")
+    and "pam_unix.so" in line
+    for line in lines
+):
+    raise SystemExit("No active pam_unix.so password fallback found; left PAM unchanged.")
+
+idx = active_auth[0]
+line = lines[idx]
+if "default=ignore" not in line:
+    raise SystemExit("Fingerprint rule has no default=ignore fallback; left PAM unchanged.")
+if len(re.findall(r"\bmax-tries=\d+\b", line)) > 1:
+    raise SystemExit("Fingerprint rule has multiple max-tries values; left PAM unchanged.")
+if re.search(r"\bmax-tries=\d+\b", line):
+    line = re.sub(r"\bmax-tries=\d+\b", "max-tries=3", line, count=1)
+else:
+    line = line.replace("pam_fprintd.so", "pam_fprintd.so max-tries=3", 1)
+lines[idx] = line
+
+fd, tmp_name = tempfile.mkstemp(prefix=".common-auth.goodix-", dir=str(path.parent))
+try:
+    os.fchmod(fd, stat.S_IMODE(st.st_mode))
+    os.fchown(fd, st.st_uid, st.st_gid)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+        stream.writelines(lines)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(tmp_name, path)
+except BaseException:
+    try:
+        os.unlink(tmp_name)
+    except FileNotFoundError:
+        pass
+    raise
+PYTHON
+    sudo grep -n 'pam_fprintd\.so' "$pam_file"
+    echo 'Enabled fingerprint PAM with max-tries=3; existing password fallback is preserved.'
+    echo 'The driver installer still leaves PAM unchanged unless --pam is explicitly used.'
+)
+
 check_setup() {
     echo "Architecture: $(uname -m) (engine requires x86_64)"
     if command -v lsusb >/dev/null; then
@@ -174,6 +280,67 @@ check_setup() {
     echo 'These checks do not establish a working driver. Test with fprintd-enroll and fprintd-verify before enabling PAM.'
 }
 
+verify_install() {
+    local prefix=/opt/goodix-libfprint
+    local dropdir=/etc/systemd/system/fprintd.service.d
+    local marker='goodix-5e0a private install v1'
+    local failed=0 unit_load='' unit_user='' unit_env=''
+
+    if [[ -d "$prefix" && ! -L "$prefix" ]] && printf '%s\n' "$marker" | cmp -s - "$prefix/.goodix-install"; then
+        echo '[OK] private installation marker'
+    else
+        echo '[FAIL] private installation marker missing or changed'
+        failed=1
+    fi
+    if [[ -s "$prefix/lib/libfprint-2.so.2" && -f "$prefix/lib/libfprint-2.so.2" ]]; then
+        echo '[OK] private libfprint shared library'
+    else
+        echo '[FAIL] private libfprint shared library missing or broken'
+        failed=1
+    fi
+    if [[ -s "$prefix/GoodixEngineAdapter.dll" && -f "$prefix/GoodixEngineAdapter.dll" ]]; then
+        echo '[OK] Goodix engine DLL'
+    else
+        echo '[FAIL] Goodix engine DLL missing or empty'
+        failed=1
+    fi
+    if [[ -f "$dropdir/90-goodix.conf" && ! -L "$dropdir/90-goodix.conf" ]] && \
+       printf '# %s\n[Service]\nEnvironment=LD_LIBRARY_PATH=%s/lib\nEnvironment=GOODIX_ENGINE_DLL_PATH=%s/GoodixEngineAdapter.dll\n' \
+           "$marker" "$prefix" "$prefix" | cmp -s - "$dropdir/90-goodix.conf"; then
+        echo '[OK] owned systemd drop-in'
+    else
+        echo '[FAIL] owned systemd drop-in missing or changed'
+        failed=1
+    fi
+
+    if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+        unit_load=$(systemctl show fprintd.service -p LoadState --value 2>/dev/null || true)
+        unit_user=$(systemctl show fprintd.service -p User --value 2>/dev/null || true)
+        unit_env=$(systemctl show fprintd.service -p Environment --value 2>/dev/null || true)
+        if [[ $unit_load == loaded && ( -z $unit_user || $unit_user == root ) ]]; then
+            echo '[OK] fprintd systemd unit is loaded and runs as root'
+        else
+            echo '[FAIL] fprintd systemd unit is missing or has a non-root service user'
+            failed=1
+        fi
+        if [[ $unit_env == *"LD_LIBRARY_PATH=$prefix/lib"* && $unit_env == *"GOODIX_ENGINE_DLL_PATH=$prefix/GoodixEngineAdapter.dll"* ]]; then
+            echo '[OK] effective fprintd environment points to the private driver'
+        else
+            echo '[FAIL] effective fprintd environment does not point to the private driver'
+            failed=1
+        fi
+    else
+        echo '[FAIL] systemd is not available; cannot verify the fprintd unit'
+        failed=1
+    fi
+
+    if (( failed )); then
+        echo 'Installation verification failed. No files were changed.' >&2
+        return 1
+    fi
+    echo 'Installation files and systemd configuration are present. Hardware enrollment and matching are not tested.'
+}
+
 main() (
     set -euo pipefail
     umask 022
@@ -181,7 +348,7 @@ main() (
     local no_deps=false output='' argc=$#
     while (($#)); do
         case $1 in
-            --help|--check|--uninstall|--integrate)
+            --help|--check|--verify-install|--uninstall|--integrate|--pam)
                 [[ $argc == 1 ]] || { usage >&2; exit 1; }
                 mode=${1#--}; shift ;;
             --no-deps) no_deps=true; shift ;;
@@ -196,7 +363,9 @@ main() (
     done
     if [[ $mode == help ]]; then usage; return; fi
     if [[ $mode == check ]]; then check_setup; return; fi
+    if [[ $mode == verify-install ]]; then verify_install; return; fi
     if [[ $mode == integrate ]]; then apply_integration; return; fi
+    if [[ $mode == pam ]]; then apply_pam; return; fi
     # os-release is supplied by the OS; sourcing handles single/double quoted IDs.
     local ID='' ID_LIKE=''
     # shellcheck disable=SC1091
@@ -285,13 +454,14 @@ main() (
     [[ -z $daemon_user || $daemon_user == root ]] || { fail "fprintd must run as root; found User=$daemon_user. No USB permissions changed."; exit 1; }
     build_stage "$tmp" "$script_dir" "$tmp/GoodixEngineAdapter.dll"
     sudo bash -c "$(declare -f fail install_files); install_files \"\$@\"" bash "$tmp/stage/opt/goodix-libfprint" "$prefix" "$dropdir"
+    verify_install
     echo "Installed private libfprint and DLL under $prefix; added $dropdir/90-goodix.conf."
     echo 'No global library replacement, USB permission changes, PAM changes, or automatic service restart.'
     echo 'No --no-timeout override: daemon idle-exit may discard parked TLS sessions.'
     echo 'Non-NixOS end-to-end operation is unverified. Keep password login available.'
     echo 'When ready: sudo systemctl restart fprintd; then fprintd-enroll and fprintd-verify.'
     integration_hints
-    printf 'Uninstall: %q --uninstall\n' "$script_dir/install.sh"
+    printf 'Uninstall with preflight and postflight checks: %q\n' "$script_dir/uninstall.sh"
     echo 'Uninstall preserves enrolled prints and installed distro packages.'
 )
 

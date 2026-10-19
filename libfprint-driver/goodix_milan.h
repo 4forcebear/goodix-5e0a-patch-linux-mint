@@ -91,6 +91,6 @@ guint goodix_milan_frame_quality (const uint8_t *pixels,
                                   guint *out_quality,
                                   guint *out_overlap);
 
-#define GOODIX_MILAN_ENROLL_TOUCHES 12
+#define GOODIX_MILAN_ENROLL_TOUCHES 24
 
 G_END_DECLS

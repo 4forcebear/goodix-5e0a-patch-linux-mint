@@ -1191,14 +1191,22 @@ void *goodix_milan_enroll_start (int *max_images) {
     if (!g_milan_available && !goodix_milan_init(NULL)) return NULL;
     g_rec_mutex_lock (&g_milan_mutex);
     ensure_gs();
-    int max_imgs = 16;
+    int requested_imgs = GOODIX_MILAN_ENROLL_TOUCHES;
+    int max_imgs = requested_imgs;
     void *ctx = m_enrolStartEx(&max_imgs);
     if (!ctx) {
         g_rec_mutex_unlock (&g_milan_mutex);
         return NULL;
     }
+    if (max_imgs < requested_imgs) {
+        g_warning ("Milan SDK enrollment capacity %d is below requested %d",
+                   max_imgs, requested_imgs);
+        m_enrolFinish(ctx);
+        g_rec_mutex_unlock (&g_milan_mutex);
+        return NULL;
+    }
     if (max_images) *max_images = max_imgs;
-    *(u16*)((char*)ctx + 8) = GOODIX_MILAN_ENROLL_TOUCHES; /* Accepted touches only */
+    *(u16*)((char*)ctx + 8) = requested_imgs; /* Accepted touches only */
     g_rec_mutex_unlock (&g_milan_mutex);
     return ctx;
 }
@@ -1291,7 +1299,8 @@ int goodix_milan_verify_image (const uint8_t *pixels,
     void *unpacked_template = NULL;
     int unpack_res = m_templateUnPack(template_blob, (int)template_len, NULL, &unpacked_template);
     if (unpack_res != 0 || !unpacked_template) {
-        g_warning("5e0a: templateUnPack failed (err=%d)", unpack_res);
+        g_warning("5e0a: templateUnPack failed (err=%d len=%zu)",
+                  unpack_res, template_len);
         g_rec_mutex_unlock (&g_milan_mutex);
         return 0;
     }
@@ -1306,7 +1315,9 @@ int goodix_milan_verify_image (const uint8_t *pixels,
     int id_res = m_identifyImage(&probe, NULL, active_templates, 1,
                                  &matched_idx, &match_score, details,
                                  0, 0, NULL, 0);
-    (void)id_res;
+    g_message ("5e0a Milan identify: unpack=%d template_len=%zu result=%d idx=%d raw_score=%d details=%u,%u quality=%u overlap=%u",
+               unpack_res, template_len, id_res, matched_idx, match_score,
+               details[0], details[1], probe.quality, probe.overlap);
 
     m_templateDelete(unpacked_template);
 
