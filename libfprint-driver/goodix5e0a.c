@@ -2310,7 +2310,7 @@ fpi_device_goodixtls5e0a_class_init (FpiDeviceGoodixTls5e0aClass * class)
   dev_class->full_name = "Goodix TLS Fingerprint Sensor 5e0a";
   dev_class->type = FP_DEVICE_TYPE_USB;
   dev_class->id_table = goodix_5e0a_id_table;
-  dev_class->nr_enroll_stages = 12;
+  dev_class->nr_enroll_stages = GOODIX_MILAN_ENROLL_TOUCHES;
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
   /* Disable thermal watchdog */
   dev_class->temp_hot_seconds = -1;

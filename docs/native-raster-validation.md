@@ -9,7 +9,9 @@ The normal driver now smooths with a clipped 3x3 mean, subtracts a clipped
 11x11 mean of that smoothed image, and scales the residual RMS to 80 around
 128, rounding and clipping to 8 bits. The public sensor raster stays 64x80.
 The shared Milan bridge transposes it to 80x64 for quality, enrollment,
-verification and gallery identification. Enrollment still targets 12 touches.
+verification and gallery identification. The original hardware runs below used
+12 enrollment touches. The current Realme Book variant uses 24 accepted
+touches; see [its hardware report](hardware-validation-realme-book-14-i5.md).
 
 ## Evidence
 
@@ -58,7 +60,7 @@ fresh enrollment and repeat the same hands-off/holding protocol and five genuine
 and five wrong-finger attempts.
 
 Confirm: no hands-off advances, one hold advance followed by waiting for
-release, all 12 enrollment stages complete, genuine matches and wrong-finger
+release, all 24 enrollment stages complete, genuine matches and wrong-finger
 rejections. Falsify: repeated hold advances, spurious activity, genuine failures
 or any wrong-finger match. Wrong build or old enrollment makes the run
 inconclusive. The single next hardware check is this normal-install run on
