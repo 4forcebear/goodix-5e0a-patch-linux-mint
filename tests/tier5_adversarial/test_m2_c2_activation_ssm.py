@@ -101,15 +101,26 @@ class TestM2C2ActivationSSM(unittest.TestCase):
     def test_firmware_version_mismatch_adversarial(self):
         """
         Adversarially inject mismatched firmware version strings and verify detection.
-        goodixtls5xx_check_firmware_version must reject non-matching strings.
+        goodixtls5xx_check_firmware_version must accept explicitly supported
+        5e0a revisions and reject every other string.
         """
         with open(repo("libfprint-driver", "goodix5xx.c"), "r", encoding="utf-8") as f:
             base = f.read()
         self.assertIn("goodixtls5xx_check_firmware_version", base)
         self.assertIn("strcmp (firmware, cls->firmware_version)", base)
+        self.assertIn("strcmp (firmware, cls->firmware_version_compat)", base)
         with open(repo("libfprint-driver", "goodix5e0a.c"), "r", encoding="utf-8") as f:
             drv = f.read()
         self.assertIn("firmware_version = GOODIX_5E0A_FIRMWARE_VERSION;", drv)
+        self.assertIn("firmware_version_compat = GOODIX_5E0A_COMPAT_FIRMWARE_VERSION;", drv)
+        with open(repo("libfprint-driver", "goodix5e0a.h"), "r", encoding="utf-8") as f:
+            drv_header = f.read()
+        compat_version = "GFUSB_GM168SEC_APP_10034"
+        self.assertIn(f'GOODIX_5E0A_COMPAT_FIRMWARE_VERSION ("{compat_version}")', drv_header)
+        supported_versions = [FIRMWARE_VERSION_STR, compat_version]
+        for supported_fw in supported_versions:
+            matches = (supported_fw == FIRMWARE_VERSION_STR or supported_fw == compat_version)
+            self.assertTrue(matches, f"Supported FW '{supported_fw}' was incorrectly rejected")
         mismatched_versions = [
             "GFUSB_GM168SEC_APP_10037",
             "GFUSB_GM168SEC_APP_10035",
@@ -120,8 +131,8 @@ class TestM2C2ActivationSSM(unittest.TestCase):
             "INVALID_MCU_FW"
         ]
         for bad_fw in mismatched_versions:
-            # Emulate check in goodixtls5xx_check_firmware_version
-            matches = (bad_fw == FIRMWARE_VERSION_STR)
+            # Emulate the explicit primary + compatibility version check.
+            matches = (bad_fw == FIRMWARE_VERSION_STR or bad_fw == compat_version)
             self.assertFalse(matches, f"Mismatched FW '{bad_fw}' was incorrectly accepted")
 
     def test_firmware_version_truncated_payload(self):

@@ -8,6 +8,11 @@ Runs as a libfprint module and loads Goodix's Windows engine (`GoodixEngineAdapt
 
 Run `./install.sh` on supported non-NixOS distributions. The repository includes the Windows engine DLL. For other options, see `./install.sh --help`.
 
+The `v1.0.2` hotfix supports APP_10034 and APP_10036 firmware and fixes
+`Missing Goodix sensor calibration` on the first touch. It completed 24/24
+enrollment, three genuine matches, and one different-finger rejection on a
+Realme Book 14 i5. See [hotfix validation](docs/hotfix-app10034-calibration.md).
+
 ### Quick setup: Linux Mint / Ubuntu
 
 This path is for x86_64 systems with a Goodix `27c6:5e0a` sensor. It was
@@ -25,17 +30,17 @@ lsusb -d 27c6:5e0a
 ```
 
 Run the installer as your normal user, without `sudo`. This command uses the
-pinned `v1.0.1` release archive and hands off to the checked installer:
+pinned `v1.0.2` release archive and hands off to the checked installer:
 
 ```bash
 set -o pipefail
-curl -fsSL https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.1/easy-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.2/easy-install.sh | bash
 ```
 
 For a full checkout instead of the bootstrap:
 
 ```bash
-git clone --branch v1.0.1 --depth 1 https://github.com/4forcebear/goodix-5e0a-patch-linux-mint.git
+git clone --branch v1.0.2 --depth 1 https://github.com/4forcebear/goodix-5e0a-patch-linux-mint.git
 cd goodix-5e0a-patch-linux-mint
 ./install.sh
 ./install.sh --verify-install
@@ -44,7 +49,7 @@ cd goodix-5e0a-patch-linux-mint
 The bootstrap requires `curl` and `tar`. To inspect it before running:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.1/easy-install.sh
+curl -fsSLO https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.2/easy-install.sh
 less easy-install.sh
 bash easy-install.sh
 ```
@@ -62,7 +67,7 @@ enrollment and matching work; keep password authentication enabled as fallback:
 
 ```bash
 set -o pipefail
-curl -fsSL https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.1/easy-install.sh | bash -s -- --pam
+curl -fsSL https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.2/easy-install.sh | bash -s -- --pam
 ```
 
 This creates a root-only backup of the PAM files, sets three fingerprint

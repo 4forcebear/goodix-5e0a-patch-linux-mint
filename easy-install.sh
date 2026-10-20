@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly REPOSITORY='4forcebear/goodix-5e0a-patch-linux-mint'
-readonly RELEASE_TAG='v1.0.1'
+readonly RELEASE_TAG='v1.0.2'
 readonly ARCHIVE_URL="https://github.com/${REPOSITORY}/archive/refs/tags/${RELEASE_TAG}.tar.gz"
 readonly BOOTSTRAP_URL="https://raw.githubusercontent.com/${REPOSITORY}/${RELEASE_TAG}/easy-install.sh"
 

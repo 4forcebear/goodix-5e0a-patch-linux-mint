@@ -186,6 +186,8 @@ on_device_otp (FpDevice *dev, guint8 *data, guint16 len,
                gpointer ssm, GError *error)
 {
   FpiDeviceGoodixTls5e0a *self = FPI_DEVICE_GOODIXTLS5E0A (dev);
+  /* A failed OTP refresh must never leave an earlier capture payload usable. */
+  g_object_set_data (G_OBJECT (dev), "goodix5e0a-capture-payload", NULL);
   if (error)
     {
       fpi_ssm_mark_failed (ssm, error);
@@ -212,6 +214,10 @@ on_device_otp (FpDevice *dev, guint8 *data, guint16 len,
   memcpy (self->calibrated_down + 2, capture + 2, 8);
   memcpy (self->calibrated_down + 26, capture + 2, 8);
   memcpy (self->calibrated_up + 2, capture + 2, 8);
+  /* The shared MCU_GET_IMAGE path reads this device-owned copy. The local
+   * capture array expires when this OTP callback returns. */
+  g_object_set_data_full (G_OBJECT (dev), "goodix5e0a-capture-payload",
+                          g_memdup2 (capture, sizeof (capture)), g_free);
   g_message ("5e0a OTP calibration: tcode=%u DAC=%u/%u/%u/%u (CRC valid)",
              tcode, capture[2], capture[4], capture[6], capture[8]);
   fpi_ssm_next_state (ssm);
@@ -2299,6 +2305,7 @@ fpi_device_goodixtls5e0a_class_init (FpiDeviceGoodixTls5e0aClass * class)
   xx_cls->psk_flags = GOODIX_5E0A_PSK_FLAGS;
   xx_cls->psk_len = sizeof (goodix_5e0a_psk);
   xx_cls->firmware_version = GOODIX_5E0A_FIRMWARE_VERSION;
+  xx_cls->firmware_version_compat = GOODIX_5E0A_COMPAT_FIRMWARE_VERSION;
   xx_cls->reset_number = GOODIX_5E0A_RESET_NUMBER;
   xx_cls->has_calibration = FALSE;
 

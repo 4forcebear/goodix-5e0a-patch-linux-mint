@@ -176,7 +176,9 @@ goodixtls5xx_check_firmware_version (FpDevice *dev, gchar *firmware,
   fp_dbg ("Device firmware: \"%s\"", firmware);
   FpiDeviceGoodixTls5xxClass * cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS (FPI_DEVICE_GOODIXTLS5XX (dev));
 
-  if (strcmp (firmware, cls->firmware_version))
+  if (strcmp (firmware, cls->firmware_version) &&
+      (!cls->firmware_version_compat ||
+       strcmp (firmware, cls->firmware_version_compat)))
     {
       g_set_error (&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                    "Invalid device firmware: \"%s\"", firmware);

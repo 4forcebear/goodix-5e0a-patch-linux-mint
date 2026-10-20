@@ -75,7 +75,8 @@ struct _FpiDeviceGoodixTls5xxClass
   guint16                       scan_width; ///< width of the raw scanner image
   guint16                       scan_height; ///< height of the raw scanner image
 
-  const char                  * firmware_version; ///< only needed if goodixtls5xx_check_firmware_version() is used
+  const char                  * firmware_version; ///< primary firmware accepted by goodixtls5xx_check_firmware_version()
+  const char                  * firmware_version_compat; ///< optional additional compatible revision
 
   /// only needed if goodixtls5xx_check_preset_psk_read() is used
   int            psk_flags;
