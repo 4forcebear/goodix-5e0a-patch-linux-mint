@@ -162,9 +162,21 @@ apply_integration() (
     fi
 )
 
+choose_pam_profile() {
+    local profile_dir=$1
+    # Mint's guard skips fingerprint login when the home directory first
+    # needs a password for decryption. It still permits sudo and unlock.
+    if [[ -r $profile_dir/fingwit ]] &&
+       dpkg-query -s libpam-fingwit 2>/dev/null | grep -q '^Status: install ok installed$'; then
+        printf '%s\n' fingwit
+    else
+        printf '%s\n' fprintd
+    fi
+}
+
 apply_pam() (
     set -euo pipefail
-    local ID='' ID_LIKE='' backup_dir='' pam_file=/etc/pam.d/common-auth
+    local ID='' ID_LIKE='' backup_dir='' pam_file=/etc/pam.d/common-auth pam_profile=''
     # shellcheck disable=SC1091
     if [[ -r /etc/os-release ]]; then . /etc/os-release; fi
     case " $ID $ID_LIKE " in
@@ -184,22 +196,35 @@ apply_pam() (
     if sudo test -f /var/lib/pam/seen; then
         sudo cp -a /var/lib/pam/seen "$backup_dir/pam-seen"
     fi
+    if sudo test -d /var/lib/pam; then
+        sudo cp -a /var/lib/pam "$backup_dir/pam-state"
+    fi
     echo "PAM backup saved at $backup_dir"
 
     if ! dpkg-query -s libpam-fprintd 2>/dev/null | grep -q '^Status: install ok installed$'; then
         sudo apt-get update
         sudo apt-get install -y libpam-fprintd
     fi
-    [[ -r /usr/share/pam-configs/fprintd ]] || {
-        fail 'libpam-fprintd did not provide the fprintd PAM profile'
+    pam_profile=$(choose_pam_profile /usr/share/pam-configs)
+    [[ -r /usr/share/pam-configs/$pam_profile ]] || {
+        fail "PAM profile missing: $pam_profile"
         exit 1
     }
-    if ! grep -Eq '^[[:space:]]*auth[[:space:]].*pam_fprintd\.so' "$pam_file"; then
+    if [[ $pam_profile == fprintd &&
+          ( -e $HOME/.ecryptfs || -e $HOME/.Private || -d /home/.ecryptfs/$(id -un) ) ]]; then
+        fail 'Encrypted home detected without the Mint Fingwit guard. Automatic fingerprint PAM setup is unavailable; keep password authentication for initial login.'
+        exit 1
+    fi
+    if [[ $pam_profile == fingwit ]]; then
+        # The profiles conflict: enabling raw fprintd would bypass Mint's
+        # encrypted-home check. Migrate through the distro's profile manager.
+        sudo env DEBIAN_FRONTEND=noninteractive pam-auth-update --disable fprintd --enable fingwit
+    elif ! grep -Eq '^[[:space:]]*auth[[:space:]].*pam_fprintd\.so' "$pam_file"; then
         # Never use --force: preserve locally customized PAM stacks.
         sudo env DEBIAN_FRONTEND=noninteractive pam-auth-update --enable fprintd
     fi
 
-    sudo python3 - "$pam_file" <<'PYTHON'
+    sudo python3 - "$pam_file" "$pam_profile" <<'PYTHON'
 import os
 import re
 import stat
@@ -231,6 +256,19 @@ if not any(
     raise SystemExit("No active pam_unix.so password fallback found; left PAM unchanged.")
 
 idx = active_auth[0]
+if sys.argv[2] == "fingwit":
+    preceding_auth = [
+        i for i in range(idx)
+        if re.match(r"^[ \t]*auth(?:[ \t]|$)", lines[i])
+    ]
+    if not preceding_auth or not re.match(
+        r"^[ \t]*auth[ \t]+\[authinfo_unavail=1[ \t]+default=ignore\][ \t]+pam_fingwit\.so(?:[ \t]|$)",
+        lines[preceding_auth[-1]],
+    ):
+        raise SystemExit(
+            "Mint Fingwit guard missing directly before pam_fprintd.so; left PAM unchanged. "
+            "pam-auth-update may have preserved local edits; review the saved backup."
+        )
 line = lines[idx]
 if "default=ignore" not in line:
     raise SystemExit("Fingerprint rule has no default=ignore fallback; left PAM unchanged.")
@@ -259,6 +297,10 @@ except BaseException:
     raise
 PYTHON
     sudo grep -n 'pam_fprintd\.so' "$pam_file"
+    echo "Fingerprint PAM profile: $pam_profile"
+    if [[ $pam_profile == fingwit ]]; then
+        echo 'Mint Fingwit protects initial login to encrypted homes; fingerprint remains available after login.'
+    fi
     echo 'Enabled fingerprint PAM with max-tries=3; existing password fallback is preserved.'
     echo 'The driver installer still leaves PAM unchanged unless --pam is explicitly used.'
 )

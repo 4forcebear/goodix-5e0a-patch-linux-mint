@@ -13,6 +13,11 @@ The `v1.0.2` hotfix supports APP_10034 and APP_10036 firmware and fixes
 enrollment, three genuine matches, and one different-finger rejection on a
 Realme Book 14 i5. See [hotfix validation](docs/hotfix-app10034-calibration.md).
 
+The `v1.0.3` release fixes fingerprint blocking the initial password prompt
+on Mint with an encrypted home. Its Fingwit guard was confirmed after a
+cold boot. Matching reliability remains a separate open issue; see the
+[release notes and validation](docs/release-v1.0.3.md).
+
 ### Quick setup: Linux Mint / Ubuntu
 
 This path is for x86_64 systems with a Goodix `27c6:5e0a` sensor. It was
@@ -30,17 +35,17 @@ lsusb -d 27c6:5e0a
 ```
 
 Run the installer as your normal user, without `sudo`. This command uses the
-pinned `v1.0.2` release archive and hands off to the checked installer:
+pinned `v1.0.3` release archive and hands off to the checked installer:
 
 ```bash
 set -o pipefail
-curl -fsSL https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.2/easy-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.3/easy-install.sh | bash
 ```
 
 For a full checkout instead of the bootstrap:
 
 ```bash
-git clone --branch v1.0.2 --depth 1 https://github.com/4forcebear/goodix-5e0a-patch-linux-mint.git
+git clone --branch v1.0.3 --depth 1 https://github.com/4forcebear/goodix-5e0a-patch-linux-mint.git
 cd goodix-5e0a-patch-linux-mint
 ./install.sh
 ./install.sh --verify-install
@@ -49,7 +54,7 @@ cd goodix-5e0a-patch-linux-mint
 The bootstrap requires `curl` and `tar`. To inspect it before running:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.2/easy-install.sh
+curl -fsSLO https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.3/easy-install.sh
 less easy-install.sh
 bash easy-install.sh
 ```
@@ -67,13 +72,21 @@ enrollment and matching work; keep password authentication enabled as fallback:
 
 ```bash
 set -o pipefail
-curl -fsSL https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.2/easy-install.sh | bash -s -- --pam
+curl -fsSL https://raw.githubusercontent.com/4forcebear/goodix-5e0a-patch-linux-mint/v1.0.3/easy-install.sh | bash -s -- --pam
 ```
 
 This creates a root-only backup of the PAM files, sets three fingerprint
 attempts, and keeps the Unix-password fallback. Desktop login, lock screens,
 and `sudo` use different PAM stacks; test them separately. An eCryptfs home
 may still require the account password at graphical login.
+
+On Linux Mint, `--pam` selects the installed **Fingwit** profile instead of
+raw `fprintd`. Fingwit's guard skips fingerprint authentication at initial
+login when the encrypted home needs a password. Fingerprint authentication
+remains available for `sudo` and screen unlock after login. If an encrypted
+home is detected without this guard installed, automatic PAM setup refuses
+to enable the raw profile. The installer checks that the guard directly
+precedes the fingerprint rule before applying the three-attempt setting.
 
 The bootstrap forwards installer options. Its `--uninstall` option uses the
 standalone checked uninstaller; `--uninstall --check` runs its read-only
